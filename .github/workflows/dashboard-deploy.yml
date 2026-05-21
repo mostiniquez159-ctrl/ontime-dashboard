@@ -1,0 +1,113 @@
+# STD_15B §15B.6.3 — CI/CD Pipeline: ontime-dashboard
+# Environments: staging (8081) → smoke gate → prod (80)
+# Runner: self-hosted (ontime-server)
+
+name: Dashboard Deploy
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: [self-hosted, linux]
+    environment: staging
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to staging (port 8081)
+        run: |
+          rsync -a --delete \
+            --exclude='.git' \
+            --exclude='.github' \
+            $GITHUB_WORKSPACE/ /root/agents/v3/dashboard-staging/
+
+      - name: Restart staging service
+        run: |
+          systemctl restart ontime-dashboard-staging.service || true
+          sleep 3
+
+      - name: Smoke gate (§15B.6.4)
+        run: |
+          BASE="http://localhost:8081"
+          FAIL=0
+
+          check() {
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" "$1")
+            if [ "$CODE" != "200" ]; then
+              echo "FAIL [$CODE]: $1"
+              FAIL=1
+            else
+              echo "PASS [200]: $1"
+            fi
+          }
+
+          check "$BASE/"
+          check "$BASE/api/status"
+          check "$BASE/api/agents"
+          check "$BASE/api/tasks"
+          check "$BASE/api/health"
+          check "$BASE/api/metrics"
+          check "$BASE/api/clients"
+
+          if [ "$FAIL" != "0" ]; then
+            echo "Smoke gate FAILED — blocking deploy to production"
+            exit 1
+          fi
+          echo "Smoke gate PASS — all 7 checks OK"
+
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: [self-hosted, linux]
+    environment: production
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to production (port 80)
+        run: |
+          rsync -a --delete \
+            --exclude='.git' \
+            --exclude='.github' \
+            $GITHUB_WORKSPACE/ /root/agents/v3/dashboard/
+
+      - name: Restart production service
+        run: |
+          systemctl restart ontime-dashboard.service
+          sleep 3
+
+      - name: Production health check
+        run: |
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost/api/status")
+          if [ "$CODE" != "200" ]; then
+            echo "Production health check FAILED [$CODE] — manual rollback required"
+            exit 1
+          fi
+          echo "Production healthy [200]"
+
+      - name: Record deploy evidence (§15B.6.11)
+        run: |
+          DEPLOY_LOG="/data/runtime/logs/ci_deploy_$(date +%Y%m%d_%H%M%S).json"
+          cat > "$DEPLOY_LOG" <<EOF
+          {
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "commit": "$GITHUB_SHA",
+            "branch": "$GITHUB_REF_NAME",
+            "actor": "$GITHUB_ACTOR",
+            "run_id": "$GITHUB_RUN_ID",
+            "environment": "production",
+            "smoke_gate": "PASS",
+            "health_check": "PASS"
+          }
+          EOF
+          echo "Deploy evidence saved: $DEPLOY_LOG"
