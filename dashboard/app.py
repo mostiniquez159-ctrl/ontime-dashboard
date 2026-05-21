@@ -60,7 +60,6 @@ def get_agents():
     thin = _load_json(THIN_CTRL_JSON, {})
     states = thin.get('agent_states', {})
     agents = []
-    # Search for all directories with agent.md in KB_ROOT
     for p in KB_ROOT.glob("*/agent.md"):
         key = p.parent.name
         try:
@@ -100,7 +99,8 @@ def get_clients():
         for m in int_matches: clients.append(f"_INTERNAL/{m}")
     return clients
 
-HTML = \"\"\"<!DOCTYPE html>
+def get_html():
+    return """<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
@@ -139,7 +139,7 @@ aside h1 span { color: var(--accent); }
 main { flex: 1; padding: 32px; overflow-y: auto; }
 .section { display: none; }
 .section.active { display: block; }
-.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin-top: 20px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-top: 20px; }
 .card { background: var(--surface); border: 1px solid var(--border); padding: 20px; border-radius: var(--radius); }
 .card h3 { font-size: 14px; color: var(--text2); text-transform: uppercase; margin-bottom: 8px; }
 .card .val { font-size: 32px; font-weight: 700; }
@@ -314,7 +314,7 @@ refresh();
 setInterval(refresh, 10000);
 </script>
 </body>
-</html>\"\"\"
+</html>"""
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args): pass
@@ -338,7 +338,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path in {"/", "/agents", "/tasks", "/metrics", "/health", "/clients", "/settings"}:
-            self._html(HTML)
+            self._html(get_html())
         elif path == "/api/status":
             self._json(_load_json(THIN_CTRL_JSON, {"runtime": "error", "message": "no_data"}))
         elif path == "/api/agents":
