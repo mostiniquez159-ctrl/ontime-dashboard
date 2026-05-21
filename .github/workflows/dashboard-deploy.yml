@@ -1,0 +1,101 @@
+name: dashboard-deploy
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+concurrency:
+  group: dashboard-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_NAME: ontime-dashboard
+  STAGING_PORT: '8081'
+  PROD_PORT: '80'
+
+jobs:
+  deploy-staging:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare staging env
+        run: |
+          set -euo pipefail
+          sudo systemctl stop ${APP_NAME}.service || true
+          sudo mkdir -p /root/agents/v3/dashboard
+          sudo rsync -a --delete ./ /root/agents/v3/dashboard/
+
+      - name: Start staging
+        run: |
+          set -euo pipefail
+          sudo systemctl set-environment DASHBOARD_PORT=${STAGING_PORT}
+          sudo systemctl restart ${APP_NAME}.service
+          sleep 3
+
+      - name: Smoke gate (7 checks)
+        run: |
+          set -euo pipefail
+          base="http://127.0.0.1:${STAGING_PORT}"
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$base/")" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$base/agents")" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$base/login")" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$base/api/status")" = "200"
+          curl -fsS "$base/" | grep -q "onTime Admin"
+          (curl -fsS "$base/agents" | grep -Eq "Боты|Очередь")
+          test "$(systemctl is-active ${APP_NAME}.service)" = "active"
+
+  deploy-production:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: self-hosted
+    environment:
+      name: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Save rollback ref
+        run: |
+          set -euo pipefail
+          mkdir -p /data/runtime/deploy
+          git rev-parse HEAD > /data/runtime/deploy/last_successful_dashboard_commit.txt
+
+      - name: Deploy production
+        run: |
+          set -euo pipefail
+          sudo systemctl stop ${APP_NAME}.service || true
+          sudo mkdir -p /root/agents/v3/dashboard
+          sudo rsync -a --delete ./ /root/agents/v3/dashboard/
+          sudo systemctl set-environment DASHBOARD_PORT=${PROD_PORT}
+          sudo systemctl restart ${APP_NAME}.service
+          sleep 3
+
+      - name: Smoke gate (7 checks)
+        run: |
+          set -euo pipefail
+          base="http://127.0.0.1:${PROD_PORT}"
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$base/")" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$base/agents")" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$base/login")" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$base/api/status")" = "200"
+          curl -fsS "$base/" | grep -q "onTime Admin"
+          (curl -fsS "$base/agents" | grep -Eq "Боты|Очередь")
+          test "$(systemctl is-active ${APP_NAME}.service)" = "active"
+
+      - name: Rollback on smoke fail
+        if: failure()
+        run: |
+          set -euo pipefail
+          if [ -f /data/runtime/deploy/last_successful_dashboard_commit.txt ]; then
+            rollback_commit="$(cat /data/runtime/deploy/last_successful_dashboard_commit.txt)"
+            git checkout "$rollback_commit"
+            sudo rsync -a --delete ./ /root/agents/v3/dashboard/
+            sudo systemctl restart ${APP_NAME}.service
+          fi

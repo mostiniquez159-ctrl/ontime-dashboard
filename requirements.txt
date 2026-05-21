@@ -1,0 +1,1 @@
+# stdlib-only app; keep file for runner/tool compatibility
