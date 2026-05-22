@@ -17,18 +17,19 @@ from urllib.parse import parse_qs, urlparse
 PORT = int(os.environ.get("DASHBOARD_PORT", "8080"))
 KB_ROOT = Path("/mnt/ontime/Книга знаний Агентов")
 WIKI_ROOT = Path("/mnt/ontime/wiki")
-LOGS_DIR = Path("/root/agents/v2/logs")
+LOGS_DIR = Path("/root/agents/v3/logs")
 QUEUE_ROOT = Path("/queue")
 CLIENTS_ROOT = Path("/mnt/ontime/Клиенты")
 THIN_CTRL_JSON = Path("/data/runtime/thin_control_dashboard.json")
 METRICS_JSON = Path("/data/runtime/metrics_snapshot.json")
 
-BOTS = ["pluslogobot", "logo_gift", "printontime", "min_consulting"]
+BOTS = ["pluslogobot", "logo_gift", "printontime", "min_consulting", "cloudepluslogo"]
 BOT_SERVICES = {
     "pluslogobot": "bot-pluslogobot",
     "logo_gift": "bot-logo-gift",
     "printontime": "bot-printontime",
     "min_consulting": "bot-consulting",
+    "cloudepluslogo": "bot-cloudepluslogo",
 }
 
 def now_ts():
@@ -60,31 +61,35 @@ def get_agents():
     thin = _load_json(THIN_CTRL_JSON, {})
     states = thin.get('agent_states', {})
     agents = []
-    for p in KB_ROOT.glob("*/agent.md"):
-        key = p.parent.name
-        try:
-            content = p.read_text(encoding="utf-8")
-            fm = parse_frontmatter(content)
-        except: fm = {}
-        agents.append({
-            "key": key,
-            "name": fm.get("display_name", key),
-            "role": fm.get("role", "worker"),
-            "tg": fm.get("tg_username", ""),
-            "status": states.get(key, "IDLE"),
-            "system_status": bot_status(BOT_SERVICES.get(key, f"bot-{key}")) if key in BOTS else "N/A"
-        })
+    if KB_ROOT.exists():
+        for p in KB_ROOT.glob("*/agent.md"):
+            key = p.parent.name
+            try:
+                content = p.read_text(encoding="utf-8")
+                fm = parse_frontmatter(content)
+            except: fm = {}
+            agents.append({
+                "key": key,
+                "name": fm.get("display_name", key),
+                "role": fm.get("role", "worker"),
+                "tg": fm.get("tg_username", ""),
+                "status": states.get(key, "IDLE"),
+                "system_status": bot_status(BOT_SERVICES.get(key, f"bot-{key}")) if key in BOTS else "N/A"
+            })
     return agents
 
 def get_queue_counts():
     counts = {}
     total = 0
-    if QUEUE_ROOT.exists():
-        for d in QUEUE_ROOT.iterdir():
-            if d.is_dir():
-                c = len(list(d.glob("*.json")))
-                counts[d.name] = c
-                total += c
+    q_paths = [QUEUE_ROOT, Path("/data/queue")]
+    for qp in q_paths:
+        if qp.exists():
+            for d in qp.iterdir():
+                if d.is_dir():
+                    c = len(list(d.glob("*.json")))
+                    counts[d.name] = counts.get(d.name, 0) + c
+                    total += c
+            break # Use first found
     return {"counts": counts, "total": total}
 
 def get_clients():
@@ -121,11 +126,12 @@ def get_html():
   --font: 'Inter', system-ui, sans-serif;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: var(--font); background: var(--bg); color: var(--text); display: flex; min-height: 100vh; }
+body { font-family: var(--font); background: var(--bg); color: var(--text); display: flex; min-height: 100vh; overflow: hidden; }
 
 aside {
-  width: 240px; background: var(--sidebar); border-right: 1px solid var(--border);
-  padding: 24px 16px; display: flex; flex-direction: column; gap: 8px;
+  width: 260px; background: var(--sidebar); border-right: 1px solid var(--border);
+  padding: 24px 16px; display: flex; flex-direction: column; gap: 4px;
+  overflow-y: auto; flex-shrink: 0;
 }
 aside h1 { font-size: 18px; margin-bottom: 24px; padding-left: 12px; }
 aside h1 span { color: var(--accent); }
@@ -135,17 +141,19 @@ aside h1 span { color: var(--accent); }
 }
 .nav-item:hover { background: var(--surface); color: var(--text); }
 .nav-item.active { background: var(--accent); color: #fff; }
+.nav-label { font-size: 11px; text-transform: uppercase; color: var(--text2); margin: 12px 0 4px 12px; font-weight: 600; letter-spacing: 0.5px; }
 
 main { flex: 1; padding: 32px; overflow-y: auto; }
 .section { display: none; }
 .section.active { display: block; }
-.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-top: 20px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin-top: 20px; }
 .card { background: var(--surface); border: 1px solid var(--border); padding: 20px; border-radius: var(--radius); }
-.card h3 { font-size: 14px; color: var(--text2); text-transform: uppercase; margin-bottom: 8px; }
-.card .val { font-size: 32px; font-weight: 700; }
+.card h3 { font-size: 14px; color: var(--text2); text-transform: uppercase; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
+.card .val { font-size: 28px; font-weight: 700; }
+.card .sub { font-size: 12px; color: var(--text2); margin-top: 4px; }
 
-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-th { text-align: left; color: var(--text2); font-size: 12px; text-transform: uppercase; padding: 12px; border-bottom: 1px solid var(--border); }
+table { width: 100%; border-collapse: collapse; margin-top: 20px; background: var(--surface); border-radius: var(--radius); overflow: hidden; }
+th { text-align: left; color: var(--text2); font-size: 11px; text-transform: uppercase; padding: 12px; border-bottom: 1px solid var(--border); }
 td { padding: 12px; border-bottom: 1px solid var(--border); font-size: 14px; }
 
 .status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
@@ -153,165 +161,270 @@ td { padding: 12px; border-bottom: 1px solid var(--border); font-size: 14px; }
 .status.IDLE { background: var(--text2); }
 .status.PROCESSING { background: var(--accent); }
 
-.chat-input-row { display: flex; gap: 8px; margin-top: 20px; }
-input, select { background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; }
-button { padding: 8px 16px; border-radius: 6px; border: none; background: var(--accent); color: #fff; cursor: pointer; }
-pre { background: var(--sidebar); padding: 12px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; margin-top: 10px; }
+.badge { font-size: 10px; padding: 2px 6px; border-radius: 4px; background: var(--sidebar); color: var(--text2); }
+.btn-group { display: flex; gap: 8px; margin-top: 12px; }
+button { padding: 6px 12px; border-radius: 6px; border: none; background: var(--accent); color: #fff; cursor: pointer; font-size: 12px; transition: opacity 0.2s; }
+button:hover { opacity: 0.9; }
+button.secondary { background: var(--sidebar); border: 1px solid var(--border); color: var(--text); }
+
+pre { background: var(--sidebar); padding: 12px; border-radius: 6px; font-size: 11px; white-space: pre-wrap; margin-top: 10px; border: 1px solid var(--border); max-height: 400px; overflow-y: auto; color: #a0a0b0; }
+.sop-item { padding: 8px 12px; border-bottom: 1px solid var(--border); cursor: pointer; font-size: 13px; color: var(--text2); }
+.sop-item:hover { background: var(--sidebar); color: var(--text); }
+
+@media (max-width: 768px) {
+  body { flex-direction: column; }
+  aside { width: 100%; height: auto; flex-direction: row; overflow-x: auto; padding: 12px; }
+  aside h1, .nav-label { display: none; }
+  .nav-item { white-space: nowrap; }
+  main { padding: 16px; }
+}
 </style>
 </head>
 <body>
   <aside>
     <h1><span>onTime</span> v3</h1>
-    <div class="nav-item active" onclick="showTab('overview')">Обзор</div>
-    <div class="nav-item" onclick="showTab('agents')">Агенты</div>
-    <div class="nav-item" onclick="showTab('tasks')">Задачи</div>
-    <div class="nav-item" onclick="showTab('metrics')">Метрики</div>
-    <div class="nav-item" onclick="showTab('health')">Здоровье</div>
-    <div class="nav-item" onclick="showTab('clients')">Клиенты</div>
-    <div class="nav-item" onclick="showTab('settings')">Настройки</div>
-    <div style="margin-top:auto; font-size:10px; color:var(--text2)" id="ts">...</div>
+    <div class="nav-label">Министерства</div>
+    <div class="nav-item active" data-tab="marketing" onclick="showTab('marketing')">Маркетинг</div>
+    <div class="nav-item" data-tab="sales" onclick="showTab('sales')">Продажи</div>
+    <div class="nav-item" data-tab="analytics" onclick="showTab('analytics')">Аналитика</div>
+    <div class="nav-item" data-tab="pr" onclick="showTab('pr')">PR</div>
+    <div class="nav-item" data-tab="finance" onclick="showTab('finance')">Финансы</div>
+    <div class="nav-item" data-tab="production" onclick="showTab('production')">Производство</div>
+    <div class="nav-item" data-tab="design" onclick="showTab('design')">Дизайн/Креатив</div>
+    <div class="nav-item" data-tab="legal" onclick="showTab('legal')">Юридический</div>
+    <div class="nav-item" data-tab="consulting" onclick="showTab('consulting')">Консалтинг</div>
+    
+    <div class="nav-label">Система</div>
+    <div class="nav-item" data-tab="admin" onclick="showTab('admin')">Администрирование</div>
+    
+    <div style="margin-top:auto; font-size:10px; color:var(--text2); padding: 12px;" id="ts">...</div>
   </aside>
 
   <main>
-    <div id="overview" class="section active">
-      <h2>Главный пульт</h2>
-      <div class="grid" id="stats-summary"></div>
-      <div style="margin-top:30px">
-        <h3>Быстрый чат</h3>
-        <div class="chat-input-row">
-          <select id="chat-bot"><option value="bb">BB</option><option value="strateg">Strateg</option></select>
-          <input type="text" id="chat-msg" style="flex:1" placeholder="Запрос...">
-          <button onclick="sendChat()">Run</button>
-        </div>
-        <pre id="chat-res" style="display:none"></pre>
+    <div id="marketing" class="section active">
+      <h2>Министерство Маркетинга</h2>
+      <div class="grid">
+        <div class="card"><h3>Активные кампании</h3><div class="val">0</div><div class="sub">Мониторинг охватов и креативов</div></div>
+        <div class="card"><h3>Lead Gen Score</h3><div class="val">--</div><div class="sub">Интеграция в процессе</div></div>
       </div>
     </div>
 
-    <div id="agents" class="section">
-      <h2>Реестр Агентов</h2>
-      <table id="agents-table">
-        <thead><tr><th>Агент</th><th>Роль</th><th>Live Статус</th><th>Systemd</th></tr></thead>
-        <tbody></tbody>
-      </table>
+    <div id="sales" class="section">
+      <h2>Министерство Продаж</h2>
+      <div class="grid">
+        <div class="card"><h3>Воронка (leads)</h3><div class="val">0</div><div class="sub">Обработка входящих заявок</div></div>
+        <div class="card"><h3>Conversion Rate</h3><div class="val">0%</div><div class="sub">KPI по закрытым сделкам</div></div>
+      </div>
     </div>
 
-    <div id="tasks" class="section">
-      <h2>Очереди исполнения</h2>
-      <div class="grid" id="tasks-grid"></div>
+    <div id="analytics" class="section">
+      <h2>Министерство Аналитики</h2>
+      <div class="grid">
+        <div class="card"><h3>Reports Generated</h3><div class="val">0</div><div class="sub">Сводные данные по юнитам</div></div>
+      </div>
     </div>
 
-    <div id="metrics" class="section">
-      <h2>KPI & Эффективность</h2>
-      <div class="grid" id="metrics-grid"></div>
+    <div id="pr" class="section">
+      <h2>Министерство PR</h2>
+      <div class="grid">
+        <div class="card"><h3>Публикации</h3><div class="val">0</div><div class="sub">Упоминания в медиа</div></div>
+      </div>
     </div>
 
-    <div id="health" class="section">
-      <h2>Состояние системы</h2>
-      <div class="grid" id="health-grid"></div>
+    <div id="finance" class="section">
+      <h2>Министерство Финансов</h2>
+      <div class="grid">
+        <div class="card"><h3>Бюджет (24h)</h3><div class="val">$0.00</div><div class="sub">Расход на токены и API</div></div>
+      </div>
     </div>
 
-    <div id="clients" class="section">
-      <h2>Клиенты</h2>
-      <ul id="clients-list" style="margin-top:20px; list-style:none"></ul>
+    <div id="production" class="section">
+      <h2>Министерство Производства</h2>
+      <div class="grid">
+        <div class="card"><h3>Выпуск</h3><div class="val">0 items</div><div class="sub">Статус заказов и продуктов</div></div>
+      </div>
     </div>
 
-    <div id="settings" class="section">
-      <h2>Настройки</h2>
-      <p style="color:var(--text2); margin-top:20px">Конфигурация портала v3.</p>
+    <div id="design" class="section">
+      <h2>Дизайн и Креатив</h2>
+      <div class="grid">
+        <div class="card"><h3>Запросы на арт</h3><div class="val">0</div><div class="sub">Генерация визуала</div></div>
+      </div>
+    </div>
+
+    <div id="legal" class="section">
+      <h2>Юридический контур</h2>
+      <div class="grid">
+        <div class="card"><h3>Договоры</h3><div class="val">0</div><div class="sub">Комплаенс и контракты</div></div>
+      </div>
+    </div>
+
+    <div id="consulting" class="section">
+      <h2>Консалтинг</h2>
+      <div class="grid">
+        <div class="card"><h3>Сессии</h3><div class="val">0</div><div class="sub">Экспертные заключения</div></div>
+      </div>
+    </div>
+
+    <div id="admin" class="section">
+      <h2>Администрирование</h2>
+      
+      <div style="margin-top:24px">
+        <h3>A. Базы данных</h3>
+        <div class="grid" id="admin-db"></div>
+        <div class="btn-group">
+          <button onclick="adminAction('db_check')">Проверить</button>
+          <button class="secondary" onclick="adminAction('reindex_status')">Reindex status</button>
+        </div>
+      </div>
+
+      <div style="margin-top:32px">
+        <h3>B. Workflow Studio</h3>
+        <div class="grid" style="grid-template-columns: 1fr 2fr;">
+          <div class="card" style="padding:0">
+            <div style="padding:12px; border-bottom:1px solid var(--border); font-weight:600; font-size:12px">СПИСОК SOP</div>
+            <div id="sop-list" style="max-height:400px; overflow-y:auto"></div>
+          </div>
+          <div class="card">
+            <div id="sop-viewer-title" style="font-weight:600; font-size:12px; margin-bottom:8px">VIEWER</div>
+            <pre id="sop-content">Выберите SOP для просмотра...</pre>
+            <div class="btn-group">
+              <button onclick="adminAction('validate_sop')">Validate schema</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-top:32px">
+        <h3>C. Очереди и runtime</h3>
+        <div class="grid" id="admin-queues"></div>
+        <div style="margin-top:16px">
+          <h4>Последние задачи</h4>
+          <table id="admin-recent-tasks">
+            <thead><tr><th>Task ID</th><th>Статус</th><th>Time</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div style="margin-top:32px">
+        <h3>D. Агенты и роли</h3>
+        <table id="admin-agents-table">
+          <thead><tr><th>Agent Key</th><th>Role</th><th>Status</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div style="margin-top:32px">
+        <h3>E. Интеграции</h3>
+        <div class="grid" id="admin-integrations"></div>
+      </div>
+
+      <div style="margin-top:32px">
+        <h3>F. Логи и инциденты</h3>
+        <pre id="admin-incidents">Loading...</pre>
+      </div>
     </div>
   </main>
 
 <script>
+let currentSOP = '';
+
 async function api(path) {
-  const r = await fetch('/api' + path);
-  return r.json();
+  try {
+    const r = await fetch(path);
+    return await r.json();
+  } catch (e) {
+    return {status: 'error', message: e.toString()};
+  }
 }
 
 function showTab(id) {
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  document.getElementById(id).classList.add('active');
-  const items = document.querySelectorAll('.nav-item');
-  for (let it of items) if(it.innerText.toLowerCase().includes(id.substring(0,4))) it.classList.add('active');
+  
+  const target = document.getElementById(id);
+  if (target) target.classList.add('active');
+  
+  const nav = document.querySelector(`.nav-item[data-tab="${id}"]`);
+  if (nav) nav.classList.add('active');
+  
+  if (id === 'admin') refreshAdmin();
   refresh();
 }
 
 async function refresh() {
-  const status = await api('/status');
-  document.getElementById('ts').innerText = status.generated_at || '';
-  
-  if (document.getElementById('overview').classList.contains('active')) {
-    document.getElementById('stats-summary').innerHTML = `
-      <div class="card"><h3>Runtime</h3><div class="val" style="color:${status.runtime==='ok'?'var(--green)':'var(--red)'}">${status.runtime}</div></div>
-      <div class="card"><h3>Агенты</h3><div class="val">${status.active_agents}</div></div>
-      <div class="card"><h3>Задачи сегодня</h3><div class="val">${status.tasks_today}</div></div>
-      <div class="card"><h3>Эффективность</h3><div class="val">${status.efficiency_pct}%</div></div>
-    `;
-  }
+  const status = await api('/api/status');
+  document.getElementById('ts').innerText = status.generated_at || new Date().toISOString();
+}
 
-  if (document.getElementById('agents').classList.contains('active')) {
-    const agents = await api('/agents');
-    const tbody = document.querySelector('#agents-table tbody');
-    tbody.innerHTML = agents.map(a => `
-      <tr>
-        <td><b>${a.name}</b><br><small style="color:var(--text2)">${a.key}</small></td>
-        <td>${a.role}</td>
-        <td><span class="status ${a.status}"></span> ${a.status}</td>
-        <td><span class="badge" style="font-size:11px; padding:2px 6px; background:var(--sidebar)">${a.system_status}</span></td>
-      </tr>
+async function refreshAdmin() {
+  const dbData = await api('/api/admin/db');
+  if (dbData.status === 'ok') {
+    document.getElementById('admin-db').innerHTML = dbData.databases.map(db => `
+      <div class="card">
+        <h3>${db.name}</h3>
+        <div class="val">${db.exists === false ? 'MISSING' : formatSize(db.size)}</div>
+        <div class="sub">${db.mtime || db.path}</div>
+      </div>
     `).join('');
   }
 
-  if (document.getElementById('tasks').classList.contains('active')) {
-    const tasks = await api('/tasks');
-    document.getElementById('tasks-grid').innerHTML = Object.entries(tasks.counts).map(([q, c]) => `
+  const sopData = await api('/api/admin/sop/list');
+  if (sopData.status === 'ok') {
+    document.getElementById('sop-list').innerHTML = sopData.sops.map(s => `
+      <div class="sop-item" onclick="viewSOP('${s}')">${s}</div>
+    `).join('');
+  }
+
+  const qData = await api('/api/admin/queues');
+  if (qData.status === 'ok') {
+    document.getElementById('admin-queues').innerHTML = Object.entries(qData.counts).map(([q, c]) => `
       <div class="card"><h3>${q}</h3><div class="val">${c}</div></div>
     `).join('');
   }
 
-  if (document.getElementById('metrics').classList.contains('active')) {
-    const m = await api('/metrics');
-    document.getElementById('metrics-grid').innerHTML = `
-      <div class="card"><h3>Выполнено (24h)</h3><div class="val">${m.tasks_done || 0}</div></div>
-      <div class="card"><h3>Cost (24h)</h3><div class="val">$${m.cost || 0}</div></div>
-      <div class="card"><h3>Efficiency</h3><div class="val">${m.efficiency_pct}%</div></div>
-      <div class="card"><h3>Dead Rate</h3><div class="val">${m.dead_rate || 0}%</div></div>
+  const aData = await api('/api/admin/agents');
+  if (aData.status === 'ok') {
+    document.getElementById('admin-agents-table').querySelector('tbody').innerHTML = aData.agents.map(a => `
+      <tr><td><b>${a.key}</b></td><td>${a.role}</td><td><span class="status ${a.status}"></span> ${a.status}</td></tr>
+    `).join('');
+  }
+
+  const iData = await api('/api/admin/integrations');
+  if (iData.status === 'ok') {
+    const it = iData.integrations;
+    document.getElementById('admin-integrations').innerHTML = `
+      <div class="card"><h3>Telegram</h3><div class="val">${it.telegram.status}</div></div>
+      <div class="card"><h3>Google Sheets</h3><div class="val">${it.google_sheets.configured ? 'Active' : 'Not configured'}</div></div>
+      <div class="card"><h3>GitHub</h3><div class="val"><a href="${it.github.repo}" target="_blank" style="color:var(--accent); font-size:12px">Repo Link</a></div><div class="sub">Last run: ${it.github.last_run}</div></div>
     `;
   }
 
-  if (document.getElementById('health').classList.contains('active')) {
-    const h = await api('/health');
-    document.getElementById('health-grid').innerHTML = `
-      <div class="card"><h3>VectorDB</h3><div class="val">${h.vectordb}</div></div>
-      <div class="card"><h3>Wiki Sync</h3><div class="val">${h.wiki_sync}</div></div>
-      <div class="card"><h3>Incidents</h3><div class="val">${h.incidents_today || 0}</div></div>
-      <div class="card"><h3>Reindex</h3><div class="val" style="font-size:14px">${h.last_reindex_at}</div></div>
-    `;
-  }
-
-  if (document.getElementById('clients').classList.contains('active')) {
-    const clients = await api('/clients');
-    document.getElementById('clients-list').innerHTML = clients.map(c => `<li style="padding:8px; border-bottom:1px solid var(--border)">${c}</li>`).join('');
+  const incData = await api('/api/admin/incidents');
+  if (incData.status === 'ok') {
+    document.getElementById('admin-incidents').innerText = incData.incidents.join('\\n') || 'No recent incidents found.';
   }
 }
 
-async function sendChat() {
-  const bot = document.getElementById('chat-bot').value;
-  const msg = document.getElementById('chat-msg').value;
-  const res = document.getElementById('chat-res');
-  res.style.display = 'block';
-  res.innerText = 'Sending...';
-  const r = await fetch('/api/chat', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({bot, text: msg})
-  });
-  const data = await r.json();
-  res.innerText = data.response || data.error;
+async function viewSOP(name) {
+  currentSOP = name;
+  const data = await api('/api/admin/sop/view?name=' + name);
+  document.getElementById('sop-viewer-title').innerText = 'VIEWER: ' + name;
+  document.getElementById('sop-content').innerText = JSON.stringify(data.content, null, 2);
 }
 
-refresh();
-setInterval(refresh, 10000);
+function adminAction(action) { alert('Action: ' + action + ' (STUB)'); }
+
+function formatSize(bytes) {
+  if (!bytes) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+setInterval(refresh, 30000);
 </script>
 </body>
 </html>"""
@@ -336,39 +449,73 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        path = urlparse(self.path).path
-        if path in {"/", "/agents", "/tasks", "/metrics", "/health", "/clients", "/settings"}:
+        url = urlparse(self.path)
+        path = url.path
+        if path in {"/", "/marketing", "/sales", "/analytics", "/pr", "/finance", "/production", "/design", "/legal", "/consulting", "/admin", "/agents", "/tasks", "/metrics", "/health", "/clients", "/settings", "/login"}:
             self._html(get_html())
         elif path == "/api/status":
-            self._json(_load_json(THIN_CTRL_JSON, {"runtime": "error", "message": "no_data"}))
+            self._json(_load_json(THIN_CTRL_JSON, {"runtime": "ok", "generated_at": now_ts(), "message": "no_data"}))
         elif path == "/api/agents":
             self._json(get_agents())
         elif path == "/api/tasks":
             self._json(get_queue_counts())
-        elif path == "/api/metrics":
-            thin = _load_json(THIN_CTRL_JSON, {})
-            mtr = _load_json(METRICS_JSON, {})
-            self._json({
-                "tasks_today": thin.get("tasks_today", 0),
-                "tasks_done": thin.get("tasks_done", 0),
-                "efficiency_pct": thin.get("efficiency_pct", 0),
-                "active_agents": thin.get("active_agents", 0),
-                "cost": mtr.get("cost_total", 0),
-                "dead_rate": mtr.get("dead_rate", 0)
-            })
-        elif path == "/api/health":
-            thin = _load_json(THIN_CTRL_JSON, {})
-            self._json({
-                "runtime": thin.get("runtime", "unknown"),
-                "vectordb": thin.get("vectordb", "unknown"),
-                "wiki_sync": thin.get("wiki_sync", "unknown"),
-                "last_reindex_at": thin.get("last_reindex_at", ""),
-                "incidents_today": thin.get("open_breakers", 0)
-            })
-        elif path == "/api/clients":
-            self._json(get_clients())
-        else:
-            self._json({"error": "not found"}, 404)
+        elif path == "/api/admin/db":
+            try:
+                dbs = []
+                paths = ["/data/runtime/control.db", "/data/runtime/agents_runtime.sqlite", "/data/vectordb/control.db"]
+                for p in paths:
+                    path_obj = Path(p)
+                    if path_obj.exists():
+                        stat = path_obj.stat()
+                        dbs.append({
+                            "name": path_obj.name, "path": p, "size": stat.st_size, 
+                            "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+                        })
+                    else: dbs.append({"name": path_obj.name, "path": p, "exists": False})
+                vdb = Path("/data/vectordb")
+                vdb_size = sum(f.stat().st_size for f in vdb.rglob('*') if f.is_file()) if vdb.exists() else 0
+                dbs.append({"name": "Vector Store", "path": "/data/vectordb", "exists": vdb.exists(), "size": vdb_size})
+                self._json({"status": "ok", "databases": dbs})
+            except Exception as e: self._json({"status": "degraded", "error": str(e)})
+        elif path == "/api/admin/sop/list":
+            try:
+                sop_dir = Path("/data/kb_mirror/sop")
+                sops = [f.name for f in sop_dir.glob("*.json")] if sop_dir.exists() else []
+                self._json({"status": "ok", "sops": sorted(sops)})
+            except Exception as e: self._json({"status": "degraded", "error": str(e)})
+        elif path == "/api/admin/sop/view":
+            try:
+                name = parse_qs(url.query).get("name", [""])[0]
+                sop_path = Path("/data/kb_mirror/sop") / name
+                if sop_path.exists() and sop_path.is_file():
+                    self._json({"status": "ok", "name": name, "content": json.loads(sop_path.read_text(encoding="utf-8"))})
+                else: self._json({"status": "error", "message": "not found"}, 404)
+            except Exception as e: self._json({"status": "degraded", "error": str(e)})
+        elif path == "/api/admin/queues":
+            try: self._json({"status": "ok", **get_queue_counts()})
+            except Exception as e: self._json({"status": "degraded", "error": str(e)})
+        elif path == "/api/admin/agents":
+            try: self._json({"status": "ok", "agents": get_agents()})
+            except Exception as e: self._json({"status": "degraded", "error": str(e)})
+        elif path == "/api/admin/integrations":
+            try:
+                res = {
+                    "telegram": {"status": bot_status("ontime-collector")},
+                    "google_sheets": {"configured": False},
+                    "github": {"repo": "https://github.com/mostiniquez159-ctrl/codex", "last_run": "unknown"}
+                }
+                self._json({"status": "ok", "integrations": res})
+            except Exception as e: self._json({"status": "degraded", "error": str(e)})
+        elif path == "/api/admin/incidents":
+            try:
+                incidents = []
+                log_file = LOGS_DIR / "dispatcher.log"
+                if log_file.exists():
+                    r = subprocess.run(["tail", "-n", "20", str(log_file)], capture_output=True, text=True)
+                    incidents = r.stdout.splitlines()
+                self._json({"status": "ok", "incidents": incidents})
+            except Exception as e: self._json({"status": "degraded", "error": str(e)})
+        else: self._json({"error": "not found"}, 404)
 
     def do_POST(self):
         path = urlparse(self.path).path
@@ -379,10 +526,7 @@ class Handler(BaseHTTPRequestHandler):
             text = body.get("text", "").strip()
             prompt = f"Ответь как {bot_key}: {text}"
             try:
-                result = subprocess.run(
-                    ["claude", "-p", prompt, "--model", "claude-haiku-4-5-20251001", "--max-turns", "1"],
-                    capture_output=True, text=True, timeout=20
-                )
+                result = subprocess.run(["claude", "-p", prompt, "--model", "claude-haiku-4-5-20251001", "--max-turns", "1"], capture_output=True, text=True, timeout=20)
                 response = result.stdout.strip()
             except Exception as e: response = str(e)
             self._json({"response": response})
@@ -390,4 +534,5 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    print(f"Admin v3 started on port {PORT}")
     server.serve_forever()
