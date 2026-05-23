@@ -386,6 +386,18 @@ h2 {{ font-size: 28px; font-weight: 800; margin-bottom: 32px; }}
   <div id="client-panel">
     <div class="panel-close" onclick="closeClientPanel()"><i data-feather="x"></i></div>
     <div id="panel-content">
+    <div style="display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:8px">
+      <button class="tab-btn active" onclick="switchTab('tab-main')" id="tbtn-main"
+        style="padding:6px 14px;border:none;cursor:pointer;border-radius:8px;font-size:12px;font-weight:700;background:var(--accent);color:#fff">
+        Обзор
+      </button>
+      <button class="tab-btn" onclick="switchTab('tab-docs')" id="tbtn-docs"
+        style="padding:6px 14px;border:none;cursor:pointer;border-radius:8px;font-size:12px;font-weight:700;background:transparent;color:var(--text-muted)">
+        Документы
+      </button>
+    </div>
+    <div id="tab-main">
+
       <h2 id="p-name">Client</h2>
       <div style="color:var(--text-muted);font-size:13px;margin-bottom:16px" id="p-client-id"></div>
       <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:24px">
@@ -497,6 +509,22 @@ function renderClients(list) {{
         <td><span class="badge badge-active">${{c.status}}</span></td>
         <td><button class="nav-item active" style="padding:4px 10px; font-size:10px; border:none" onclick="event.stopPropagation(); openClient('${{c.client_id}}')">ОТКРЫТЬ</button></td>
     </tr>`).join('');
+    
+    // docs
+    fetch("/api/clients/" + cid + "/docs").then(r=>r.json()).then(r => {{
+        const el = document.getElementById('p-doc-list');
+        if (!r.data || !r.data.length) {{ el.innerHTML = '<span style="color:var(--text-muted)">Нет документов</span>'; return; }}
+        el.innerHTML = r.data.map((d,i) =>
+            '<div onclick="showDoc(this.getAttribute(\'data-content\'))" ' +
+              'data-content="' + d.content.replace(/"/g,'&quot;') + '" ' +
+              'style="padding:8px 12px;cursor:pointer;border-radius:8px;font-size:12px;' +
+              'margin-bottom:4px;background:var(--surface);border:1px solid var(--border)">' +
+              d.name +
+            '</div>').join('');
+        if (r.data[0]) showDoc(r.data[0].content);
+    }});
+    switchTab('tab-main');
+
     feather.replace();
 }}
 function filterClients() {{
@@ -527,7 +555,14 @@ async function openClient(cid) {{
               <b>${{t.task_id}}</b>
               <span style="color:var(--text-muted)"> · ${{t.minister}} · ${{t.task_type}}</span>
               <span style="float:right;font-size:11px;color:var(--text-muted)">${{t.state}} · ${{t.ts}}</span>
-            </div>`).join('');
+            
+    </div>
+    <div id="tab-docs" style="display:none">
+      <div id="p-doc-list" style="margin-bottom:12px"></div>
+      <div id="p-doc-content" style="font-size:13px;line-height:1.6;white-space:pre-wrap;
+        background:var(--surface);border-radius:12px;padding:16px;color:var(--text-muted);
+        max-height:60vh;overflow-y:auto">Выбери документ слева</div>
+    </div></div>`).join('');
     }});
 
     // log
@@ -545,6 +580,22 @@ async function openClient(cid) {{
             ? r.data.map(p=>`<span style="display:inline-block;margin:3px;padding:3px 10px;background:var(--surface);border-radius:8px;font-size:12px">${{p}}</span>`).join('')
             : '<span>Нет проектов</span>';
     }});
+
+    
+    // docs
+    fetch("/api/clients/" + cid + "/docs").then(r=>r.json()).then(r => {{
+        const el = document.getElementById('p-doc-list');
+        if (!r.data || !r.data.length) {{ el.innerHTML = '<span style="color:var(--text-muted)">Нет документов</span>'; return; }}
+        el.innerHTML = r.data.map((d,i) =>
+            '<div onclick="showDoc(this.getAttribute(\'data-content\'))" ' +
+              'data-content="' + d.content.replace(/"/g,'&quot;') + '" ' +
+              'style="padding:8px 12px;cursor:pointer;border-radius:8px;font-size:12px;' +
+              'margin-bottom:4px;background:var(--surface);border:1px solid var(--border)">' +
+              d.name +
+            '</div>').join('');
+        if (r.data[0]) showDoc(r.data[0].content);
+    }});
+    switchTab('tab-main');
 
     feather.replace();
 }}
@@ -571,6 +622,23 @@ async function submitClientTask() {{
         res.style.color = 'var(--red)';
     }}
 }}
+
+function switchTab(id) {{
+    ['tab-main','tab-docs'].forEach(t => {{
+        document.getElementById(t).style.display = t===id ? 'block' : 'none';
+    }});
+    ['tbtn-main','tbtn-docs'].forEach(b => {{
+        const btn = document.getElementById(b);
+        const active = b === 'tbtn-' + id.replace('tab-','');
+        btn.style.background = active ? 'var(--accent)' : 'transparent';
+        btn.style.color = active ? '#fff' : 'var(--text-muted)';
+    }});
+}}
+
+function showDoc(content) {{
+    document.getElementById('p-doc-content').innerText = content;
+}}
+
 function closeClientPanel() {{ document.getElementById('client-panel').classList.remove('open'); }}
 window.onload = () => {{ feather.replace(); loadState(); }};
 </script>
@@ -635,6 +703,24 @@ class Handler(BaseHTTPRequestHandler):
                     raw = log_path.read_text(encoding="utf-8")
                     lines = [l for l in raw.splitlines() if l.startswith("## ")][:5]
                 self._json({"status": "ok", "data": lines})
+            
+            elif len(parts) == 4 and parts[3] == "docs":
+                cid = parts[2]
+                registry = _load_json(CLIENT_REGISTRY, {}).get("clients", {})
+                cdata = registry.get(cid, {})
+                folder = Path(cdata.get("folder", ""))
+                docs = []
+                for rel in ["client.md", "index.md", "_DASHBOARD.md"]:
+                    p = folder / rel
+                    if p.exists():
+                        docs.append({"name": rel, "path": rel, "content": p.read_text(encoding="utf-8")[:3000]})
+                for sub in ["knowledge", "inbox"]:
+                    d = folder / sub
+                    if d.exists():
+                        for f in sorted(d.glob("*.md"))[:10]:
+                            docs.append({"name": sub + "/" + f.name, "path": sub + "/" + f.name,
+                                "content": f.read_text(encoding="utf-8")[:3000]})
+                self._json({"status": "ok", "data": docs})
             elif len(parts) == 4 and parts[3] == "projects":
                 cid = parts[2]
                 registry = _load_json(CLIENT_REGISTRY, {}).get("clients", {})
