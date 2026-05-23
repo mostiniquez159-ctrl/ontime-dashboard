@@ -347,6 +347,14 @@ CONTENT_EMPTY = {
     "topics": [], "articles": [], "posts": [],
     "publications": [], "comments": [], "sheets": []
 }
+TECH_EMPTY = {
+    "bots": []
+}
+MODULE_EMPTY = {
+    "marketing": MARKETING_EMPTY,
+    "content": CONTENT_EMPTY,
+    "tech": TECH_EMPTY,
+}
 
 def _client_folder(cid):
     reg = _load_json(CLIENT_REGISTRY, {}).get("clients", {})
@@ -359,7 +367,8 @@ def _client_folder(cid):
 
 def get_module_data(cid, module):
     f = _client_folder(cid) / f"{module}.json"
-    if not f.exists(): return dict(MARKETING_EMPTY) if module == "marketing" else dict(CONTENT_EMPTY)
+    if not f.exists():
+        return json.loads(json.dumps(MODULE_EMPTY.get(module, {}), ensure_ascii=False))
     return json.loads(f.read_text(encoding="utf-8"))
 
 def save_module_data(cid, module, data):
@@ -377,13 +386,22 @@ def module_add_item(cid, module, section, item):
 
 def module_update_item(cid, module, section, item_id, updates):
     data = get_module_data(cid, module)
-    if section == "brand": data["brand"].update(updates); save_module_data(cid, module, data); return True
+    if section == "brand":
+        data["brand"] = dict(data.get("brand") or {})
+        data["brand"].update(updates)
+        data["brand"].setdefault("id", item_id or "brand")
+        save_module_data(cid, module, data)
+        return True
     for item in data.get(section, []):
         if item.get("id") == item_id: item.update(updates); save_module_data(cid, module, data); return True
     return False
 
 def module_delete_item(cid, module, section, item_id):
     data = get_module_data(cid, module)
+    if section == "brand":
+        data["brand"] = {}
+        save_module_data(cid, module, data)
+        return True
     before = len(data.get(section, []))
     data[section] = [i for i in data.get(section, []) if i.get("id") != item_id]
     if len(data.get(section, [])) < before: save_module_data(cid, module, data); return True
@@ -465,12 +483,13 @@ def get_module_section_html(module, section_id, title):
     return f"""
     <div id="{section_id}" class="section">
       <h2>{title}</h2>
-      <div style="display:flex; gap:12px; align-items:center; margin-bottom:20px">
+      <div style="display:flex; gap:12px; align-items:center; margin-bottom:20px; flex-wrap:wrap">
         <select id="{section_id}-client" class="premium-input module-client-select" style="width:240px" onchange="loadModuleData('{section_id}')">
-          <option value="">— Выберите клиента —</option>
+          <option value="">Выберите клиента</option>
         </select>
-        <button class="nav-item active" style="padding:6px 14px; font-size:12px; border:none; cursor:pointer" onclick="showModuleAddModal('{section_id}')">+ Добавить</button>
-        <button class="nav-item" style="padding:6px 14px; font-size:12px; border:none; cursor:pointer; background:var(--surface-hover)" onclick="exportModuleCsv('{section_id}')">CSV</button>
+        <button class="nav-item active" style="padding:8px 14px; font-size:12px; border:none; cursor:pointer" onclick="showModuleAddModal('{section_id}')">Добавить</button>
+        <button class="nav-item" style="padding:8px 14px; font-size:12px; border:none; cursor:pointer; background:var(--surface-hover)" onclick="exportModuleCsv('{section_id}')">Экспорт CSV</button>
+        <span id="{section_id}-status" style="font-size:12px; color:var(--text-muted); margin-left:auto"></span>
       </div>
       <div class="card premium-glow">
         <table class="premium-table">
@@ -515,7 +534,7 @@ def get_html(ministers, initial_tab="home"):
                 for item in s_data["items"]:
                     t_id = f"{s_id}_{item.replace(' ', '_').lower()}"
                     nav_html += f'<div class="nav-item" data-tab="{t_id}" onclick="showTab(\'{t_id}\')">{item}</div>'
-                    if s_id in ["marketing", "content"]:
+                    if s_id in ["marketing", "content"] or t_id == "tech_боты":
                         sections_html += get_module_section_html(s_id, t_id, item)
                     else:
                         sections_html += f'<div id="{t_id}" class="section"><h2>{s_data["name"]} • {item}</h2><div class="card premium-glow"><h3>Модуль активен</h3><p>Ожидание потока данных из контура {s_id}.</p></div></div>'
@@ -832,7 +851,8 @@ const MODULE_CONFIG = {{
   "content_посты": {{ title: "Посты", module: "content", section: "posts", columns: ["Текст", "Сеть", "Статус", "Дата"] }},
   "content_публикации": {{ title: "Публикации", module: "content", section: "publications", columns: ["Ресурс", "Ссылка", "Статус", "Дата"] }},
   "content_комментарии": {{ title: "Комментарии", module: "content", section: "comments", columns: ["Текст", "Где", "Статус", "Дата"] }},
-  "content_google-таблицы": {{ title: "GoogleТаблицы", module: "content", section: "sheets", columns: ["Название", "URL", "Статус", "Комментарий"] }}
+  "content_google-таблицы": {{ title: "GoogleТаблицы", module: "content", section: "sheets", columns: ["Название", "URL", "Статус", "Комментарий"] }},
+  "tech_боты": {{ title: "Боты", module: "tech", section: "bots", columns: ["Бот", "Платформа", "Назначение", "Статус", "Владелец", "Webhook", "Последняя проверка"] }}
 }};
 
 function saveState(t) {{ const groups = Array.from(document.querySelectorAll('.nav-group.open')).map(el => el.getAttribute('data-group')); const subs = Array.from(document.querySelectorAll('.sub-group.open')).map(el => el.getAttribute('data-subgroup')); localStorage.setItem(STATE_KEY, JSON.stringify({{ tab: t, groups, subs }})); }}
@@ -864,22 +884,53 @@ function initModuleTab(tabId) {{
     const sel = document.getElementById(tabId + '-client');
     if (!sel) return;
     ensureClientsLoaded().then(() => {{
-        const opts = ['<option value="">— Выберите клиента —</option>'].concat(allClients.map(c => `<option value="${{c.client_id}}">${{c.name}}</option>`)).join('');
+        const opts = ['<option value="">Выберите клиента</option>'].concat(allClients.map(c => `<option value="${{c.client_id}}">${{c.name}} (${{c.client_id}})</option>`)).join('');
         sel.innerHTML = opts;
+        const savedClient = localStorage.getItem('ontime_selected_client') || currentClientId;
+        if (savedClient) currentClientId = savedClient;
         if (currentClientId) {{
             sel.value = currentClientId;
             loadModuleData(tabId);
+        }} else {{
+            renderModuleEmpty(tabId, 'Выберите клиента сверху');
         }}
     }});
 }}
 
 async function loadModuleData(tabId) {{
     const cid = document.getElementById(tabId + '-client').value;
-    if (!cid) return;
+    if (!cid) return renderModuleEmpty(tabId, 'Выберите клиента сверху');
     currentClientId = cid;
+    localStorage.setItem('ontime_selected_client', cid);
     const cfg = MODULE_CONFIG[tabId];
-    const r = await fetch(`/api/module/${{cid}}/${{cfg.module}}/${{cfg.section}}`).then(res => res.json());
-    if (r.status === 'ok') renderModuleTable(tabId, r.data);
+    setModuleStatus(tabId, 'Загрузка');
+    try {{
+        const r = await fetch(`/api/module/${{cid}}/${{cfg.module}}/${{cfg.section}}`).then(res => res.json());
+        if (r.status === 'ok') {{
+            renderModuleTable(tabId, r.data);
+            setModuleStatus(tabId, 'Клиент: ' + cid);
+        }} else {{
+            renderModuleEmpty(tabId, r.message || 'Ошибка загрузки');
+            setModuleStatus(tabId, 'Ошибка');
+        }}
+    }} catch (e) {{
+        renderModuleEmpty(tabId, 'Ошибка сети');
+        setModuleStatus(tabId, 'Ошибка');
+    }}
+}}
+
+function setModuleStatus(tabId, text) {{
+    const el = document.getElementById(tabId + '-status');
+    if (el) el.innerText = text || '';
+}}
+
+function renderModuleEmpty(tabId, text) {{
+    const cfg = MODULE_CONFIG[tabId];
+    const thead = document.getElementById(tabId + '-thead');
+    const tbody = document.getElementById(tabId + '-tbody');
+    if (!thead || !tbody) return;
+    thead.innerHTML = '<tr>' + cfg.columns.map(c => `<th>${{c}}</th>`).join('') + '<th>Действия</th></tr>';
+    tbody.innerHTML = `<tr><td colspan="${{cfg.columns.length + 1}}" style="color:var(--text-muted); padding:22px 12px;">${{text || 'Нет записей'}} <button class="mkt-btn" style="margin-left:12px" onclick="showModuleAddModal('${{tabId}}')">Добавить запись</button></td></tr>`;
 }}
 
 function renderModuleTable(tabId, items) {{
@@ -890,13 +941,14 @@ function renderModuleTable(tabId, items) {{
     
     thead.innerHTML = '<tr>' + cols.map(c => `<th>${{c}}</th>`).join('') + '<th>Действия</th></tr>';
     
-    const rows = Array.isArray(items) ? items : [items];
+    const rows = (Array.isArray(items) ? items : (items && Object.keys(items).length ? [items] : [])).filter(Boolean);
+    if (!rows.length) return renderModuleEmpty(tabId, 'Нет записей');
     tbody.innerHTML = rows.map(item => `
         <tr>
             ${{cols.map(c => `<td>${{item[c] || ''}}</td>`).join('')}}
             <td>
-                <button class="mkt-btn" onclick="showModuleEditModal('${{tabId}}', '${{item.id}}')">Ред.</button>
-                <button class="mkt-btn" onclick="deleteModuleItem('${{tabId}}', '${{item.id}}')">Удал.</button>
+                <button class="mkt-btn" onclick="showModuleEditModal('${{tabId}}', '${{item.id || 'brand'}}')">Редактировать</button>
+                <button class="mkt-btn" onclick="deleteModuleItem('${{tabId}}', '${{item.id || 'brand'}}')">Удалить</button>
             </td>
         </tr>
     `).join('');
@@ -936,6 +988,7 @@ function showModuleEditModal(tabId, itemId) {{
 async function saveModuleItem(tabId, itemId = null) {{
     const cfg = MODULE_CONFIG[tabId];
     const cid = document.getElementById(tabId + '-client').value;
+    if (!cid) return alert('Выберите клиента');
     const body = {{}};
     if (itemId) body.id = itemId;
     cfg.columns.forEach(c => {{
@@ -943,6 +996,7 @@ async function saveModuleItem(tabId, itemId = null) {{
     }});
     
     const action = itemId ? 'update' : 'add';
+    setModuleStatus(tabId, 'Сохранение');
     const r = await fetch(`/api/module/${{cid}}/${{cfg.module}}/${{cfg.section}}/${{action}}`, {{
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json' }},
@@ -953,6 +1007,7 @@ async function saveModuleItem(tabId, itemId = null) {{
         closeMarketingPanel();
         loadModuleData(tabId);
     }} else {{
+        setModuleStatus(tabId, 'Ошибка сохранения');
         alert('Ошибка сохранения');
     }}
 }}
@@ -961,6 +1016,7 @@ async function deleteModuleItem(tabId, itemId) {{
     if (!confirm('Удалить запись?')) return;
     const cfg = MODULE_CONFIG[tabId];
     const cid = document.getElementById(tabId + '-client').value;
+    if (!cid) return alert('Выберите клиента');
     const r = await fetch(`/api/module/${{cid}}/${{cfg.module}}/${{cfg.section}}/delete`, {{
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json' }},
@@ -1000,7 +1056,10 @@ function renderClients(list) {{
         <td class="kpi-val ${{getColor(c.exec_percent)}}">${{c.exec_percent}}%</td>
         <td style="color:var(--text-muted)">${{c.done_count}} / ${{c.total_count}}</td>
         <td><span class="badge badge-active">${{c.status}}</span></td>
-        <td><button class="nav-item active" style="padding:4px 10px; font-size:10px; border:none" onclick="event.stopPropagation(); openClient('${{c.client_id}}')">ОТКРЫТЬ</button></td>
+        <td style="display:flex; gap:6px; align-items:center">
+          <button class="nav-item active" style="padding:4px 10px; font-size:10px; border:none" onclick="event.stopPropagation(); openClient('${{c.client_id}}')">ОТКРЫТЬ</button>
+          <button class="nav-item" style="padding:4px 10px; font-size:10px; border:none; background:rgba(239,68,68,0.15); color:var(--red)" onclick="event.stopPropagation(); deleteClient('${{c.client_id}}')">УДАЛИТЬ</button>
+        </td>
     </tr>`).join('');
     feather.replace();
 }}
@@ -1317,6 +1376,7 @@ class Handler(BaseHTTPRequestHandler):
             "agents/marketing/traffic": "marketing_источники_трафика",
             "agents/marketing/ads": "marketing_реклама",
             "agents/marketing/packaging": "marketing_упаковка_продукта",
+            "agents/tech/bots": "tech_боты",
         }
         ministers = get_ministers_from_registry()
         valid = ["", "home", "agents", "login", "kb_docs", "kb_sop", "kb_clients", "kb_vector", "wf_templates", "wf_runs", "wf_queues", "wf_logs", "sys_users", "sys_roles", "sys_integrations", "sys_admin"]
