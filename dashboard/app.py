@@ -23,6 +23,7 @@ QUEUE_ROOT = Path("/data/queue")
 AGENT_REGISTRY = KB_ROOT / "_SYSTEM/10_REGISTRY/agent_registry.json"
 CLIENT_REGISTRY = KB_ROOT / "_SYSTEM/10_REGISTRY/client_registry.json"
 CHAT_STORE = KB_ROOT / "_runtime/shared/dashboard_chats_cli.json"
+INTEGRATIONS_REGISTRY = KB_ROOT / "_runtime/integrations/service_registry.json"
 
 def _load_json(path: Path, default=None):
     try:
@@ -341,7 +342,7 @@ def now_ts():
 
 MARKETING_EMPTY = {
     "audiences": [], "pains": [], "usps": [], "offers": [],
-    "funnels": [], "traffic_sources": [], "campaigns": [], "brand": {}
+    "funnels": [], "traffic_sources": [], "campaigns": [], "creatives": [], "brand": {}
 }
 CONTENT_EMPTY = {
     "topics": [], "articles": [], "posts": [],
@@ -413,6 +414,257 @@ def module_export_csv(cid, module, section):
     if not items: return ""
     buf = io.StringIO(); writer = csv.DictWriter(buf, fieldnames=list(items[0].keys()))
     writer.writeheader(); writer.writerows(items); return buf.getvalue()
+
+def get_bots_inventory():
+    def systemd_services():
+        services = {}
+        try:
+            proc = subprocess.run(
+                ["systemctl", "list-units", "--type=service", "--all", "--no-legend", "--no-pager"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            return services
+        for raw in proc.stdout.splitlines():
+            line = raw.strip()
+            if not line or ".service" not in line:
+                continue
+            parts = line.split(None, 4)
+            if len(parts) < 4:
+                continue
+            unit, load, active, sub = parts[:4]
+            services[unit] = {
+                "unit": unit,
+                "load": load,
+                "active": active,
+                "sub": sub,
+                "description": parts[4] if len(parts) > 4 else "",
+            }
+        return services
+
+    def add_registry_entry(items, entry, group):
+        tg_bot = entry.get("tg_bot")
+        if not tg_bot or tg_bot == "inbox-only":
+            return
+        agent_key = (entry.get("runtime_key") or entry.get("public_identity_key") or entry.get("agent_id") or "").lower()
+        if agent_key.startswith("min_"):
+            agent_key = agent_key[4:]
+        items.append({
+            "agent_id": entry.get("agent_id") or "",
+            "agent_key": agent_key,
+            "tg_bot": tg_bot,
+            "role": entry.get("role") or "",
+            "registry_group": group,
+            "registry_status": entry.get("status") or "",
+        })
+
+    services = systemd_services()
+    registry = _load_json(AGENT_REGISTRY, {})
+    items = []
+    if isinstance(registry, dict):
+        if isinstance(registry.get("bb"), dict):
+            add_registry_entry(items, registry["bb"], "bb")
+        for group in ["high_council", "ministers", "technicians", "workers", "unassigned"]:
+            for entry in registry.get(group, []) if isinstance(registry.get(group), list) else []:
+                add_registry_entry(items, entry, group)
+
+    seen_services = set()
+    for item in items:
+        candidates = []
+        if item["agent_key"]:
+            candidates.append(f"tg-collector@{item['agent_key']}.service")
+        bot_name = (item["tg_bot"] or "").lstrip("@").lower()
+        bot_slug = bot_name.replace("_", "-").replace("bot", "bot")
+        candidates.extend([
+            f"bot-{bot_slug}.service",
+            f"bot-{item['agent_key']}.service" if item["agent_key"] else "",
+        ])
+        service = next((c for c in candidates if c and c in services), "")
+        state = services.get(service, {})
+        if service:
+            seen_services.add(service)
+        item.update({
+            "service": service,
+            "active": state.get("active", "missing"),
+            "sub": state.get("sub", "missing"),
+            "runtime_status": "running" if state.get("active") == "active" and state.get("sub") == "running" else ("no_service" if not service else "not_running"),
+            "description": state.get("description", ""),
+        })
+
+    # Front bot services are runtime objects too; show them even if registry lacks a matching agent row.
+    for unit, state in services.items():
+        if not unit.startswith("bot-") or unit in seen_services:
+            continue
+        items.append({
+            "agent_id": unit.removesuffix(".service"),
+            "agent_key": unit.removeprefix("bot-").removesuffix(".service"),
+            "tg_bot": "",
+            "role": state.get("description", ""),
+            "registry_group": "systemd",
+            "registry_status": "runtime_only",
+            "service": unit,
+            "active": state.get("active", "unknown"),
+            "sub": state.get("sub", "unknown"),
+            "runtime_status": "running" if state.get("active") == "active" and state.get("sub") == "running" else "not_running",
+            "description": state.get("description", ""),
+        })
+
+    items.sort(key=lambda x: (x.get("registry_group", ""), x.get("agent_id", ""), x.get("service", "")))
+    return {"status": "ok", "data": items, "source": "agent_registry+systemd"}
+
+def get_bots_inventory_systemd_only():
+    try:
+        proc = subprocess.run(
+            ["systemctl", "list-units", "--type=service", "--all", "--no-legend", "--no-pager"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception as exc:
+        return {"status": "error", "message": str(exc), "data": []}
+
+    bots = []
+    for raw in proc.stdout.splitlines():
+        line = raw.strip()
+        if not line or ".service" not in line:
+            continue
+        parts = line.split(None, 4)
+        if len(parts) < 4:
+            continue
+        unit, load, active, sub = parts[:4]
+        description = parts[4] if len(parts) > 4 else ""
+        if not (unit.startswith("bot-") or unit.startswith("tg-collector@") or unit == "telegram-bot-api.service"):
+            continue
+        if unit.startswith("bot-"):
+            bot_type = "bot"
+        elif unit.startswith("tg-collector@"):
+            bot_type = "tg-collector"
+        else:
+            bot_type = "telegram-api"
+        bots.append({
+            "unit": unit,
+            "type": bot_type,
+            "load": load,
+            "active": active,
+            "sub": sub,
+            "description": description,
+        })
+    bots.sort(key=lambda x: (x["type"], x["unit"]))
+    return {"status": "ok", "data": bots, "source": "systemd"}
+
+def default_integrations_registry():
+    return {
+        "version": "1.0",
+        "updated_at": now_ts(),
+        "source": "_runtime/integrations/service_registry.json",
+        "integrations": [],
+    }
+
+def load_integrations_registry():
+    if not INTEGRATIONS_REGISTRY.exists():
+        data = default_integrations_registry()
+        _save_json(INTEGRATIONS_REGISTRY, data)
+        return data
+    data = _load_json(INTEGRATIONS_REGISTRY, default_integrations_registry())
+    if not isinstance(data, dict):
+        data = default_integrations_registry()
+    data.setdefault("version", "1.0")
+    data.setdefault("updated_at", now_ts())
+    data.setdefault("source", "_runtime/integrations/service_registry.json")
+    data.setdefault("integrations", [])
+    if not isinstance(data["integrations"], list):
+        data["integrations"] = []
+    if not data["integrations"] and isinstance(data.get("services"), list):
+        for svc in data["services"]:
+            if not isinstance(svc, dict):
+                continue
+            name = svc.get("name") or svc.get("platform") or ""
+            data["integrations"].append({
+                "integration_id": re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or str(uuid.uuid4())[:8],
+                "platform": name,
+                "scope": svc.get("scope") or "system",
+                "owner": svc.get("owner") or "it",
+                "status": svc.get("status") if svc.get("status") in {"draft", "active", "disabled", "error", "needs_secret"} else "draft",
+                "no_secret_required": bool(svc.get("no_secret_required", False)),
+                "secret_ref": svc.get("secret_ref") or "",
+                "last_check_at": svc.get("last_check_at") or "",
+                "last_check_result": svc.get("last_check_result") or "legacy_registry",
+                "allowed_agents": svc.get("allowed_agents") if isinstance(svc.get("allowed_agents"), list) else [],
+                "links": svc.get("links") if isinstance(svc.get("links"), list) else [],
+            })
+        save_integrations_registry(data)
+    normalized = [normalize_integration(x) for x in data["integrations"] if isinstance(x, dict)]
+    if normalized != data["integrations"]:
+        data["integrations"] = normalized
+        save_integrations_registry(data)
+    return data
+
+def save_integrations_registry(data):
+    data["updated_at"] = now_ts()
+    _save_json(INTEGRATIONS_REGISTRY, data)
+
+def normalize_integration(item):
+    allowed_status = {"draft", "active", "disabled", "error", "needs_secret"}
+    status = item.get("status") if item.get("status") in allowed_status else "draft"
+    secret_ref = item.get("secret_ref") or ""
+    no_secret_required = bool(item.get("no_secret_required"))
+    if not secret_ref and not no_secret_required:
+        status = "needs_secret"
+    return {
+        "integration_id": item.get("integration_id") or item.get("id") or str(uuid.uuid4())[:8],
+        "platform": item.get("platform") or "",
+        "scope": item.get("scope") or "system",
+        "owner": item.get("owner") or "",
+        "status": status,
+        "secret_ref": secret_ref,
+        "no_secret_required": no_secret_required,
+        "last_check_at": item.get("last_check_at") or "",
+        "last_check_result": item.get("last_check_result") or "",
+        "allowed_agents": item.get("allowed_agents") if isinstance(item.get("allowed_agents"), list) else [],
+        "links": item.get("links") if isinstance(item.get("links"), list) else [],
+        "account_name": item.get("account_name") or "",
+        "account_url": item.get("account_url") or "",
+        "publish_mode": item.get("publish_mode") or "",
+        "content_owner": item.get("content_owner") or "",
+        "comment_owner": item.get("comment_owner") or "",
+    }
+
+def get_integrations_payload():
+    registry = load_integrations_registry()
+    items = [normalize_integration(x) for x in registry.get("integrations", []) if isinstance(x, dict)]
+    return {
+        "status": "ok",
+        "source": str(INTEGRATIONS_REGISTRY),
+        "updated_at": registry.get("updated_at"),
+        "data": items,
+    }
+
+def check_integration(integration_id):
+    registry = load_integrations_registry()
+    found = False
+    for idx, item in enumerate(registry.get("integrations", [])):
+        if not isinstance(item, dict):
+            continue
+        norm = normalize_integration(item)
+        if norm["integration_id"] != integration_id:
+            continue
+        found = True
+        norm["last_check_at"] = now_ts()
+        if norm["status"] == "needs_secret":
+            norm["last_check_result"] = "needs_secret"
+        elif norm["status"] == "disabled":
+            norm["last_check_result"] = "disabled"
+        else:
+            norm["last_check_result"] = "metadata_ok"
+        registry["integrations"][idx] = norm
+        break
+    if found:
+        save_integrations_registry(registry)
+    return found
 
 def create_mock_artifacts(client_id, period, run_id, goal, product, budget, kpi):
     registry = _load_json(CLIENT_REGISTRY, {}).get("clients", {})
@@ -500,6 +752,42 @@ def get_module_section_html(module, section_id, title):
     </div>
     """
 
+def get_bots_section_html():
+    return """
+    <div id="tech_боты" class="section">
+      <h2>Боты</h2>
+      <div style="display:flex; gap:12px; align-items:center; margin-bottom:20px; flex-wrap:wrap">
+        <button class="nav-item active" style="padding:8px 14px; font-size:12px; border:none; cursor:pointer" onclick="loadBotsSection()">Обновить</button>
+        <span id="bots-status" style="font-size:12px; color:var(--text-muted); margin-left:auto">Загрузка</span>
+      </div>
+      <div class="stats-grid" id="bots-summary" style="margin-bottom:20px"></div>
+      <div class="card premium-glow">
+        <table class="premium-table">
+          <thead><tr><th>Агент</th><th>Бот</th><th>Роль</th><th>Runtime</th><th>Статус</th></tr></thead>
+          <tbody id="bots-table-body"><tr><td colspan="5" style="color:var(--text-muted); padding:22px 12px;">Загрузка...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    """
+
+def get_integrations_section_html():
+    return """
+    <div id="tech_интеграции" class="section">
+      <h2>Интеграции</h2>
+      <div style="display:flex; gap:12px; align-items:center; margin-bottom:20px; flex-wrap:wrap">
+        <button class="nav-item active" style="padding:8px 14px; font-size:12px; border:none; cursor:pointer" onclick="loadIntegrationsSection()">Обновить</button>
+        <span id="integrations-status" style="font-size:12px; color:var(--text-muted); margin-left:auto">Загрузка</span>
+      </div>
+      <div class="stats-grid" id="integrations-summary" style="margin-bottom:20px"></div>
+      <div class="card premium-glow">
+        <table class="premium-table">
+          <thead><tr><th>Платформа</th><th>Scope</th><th>Аккаунт</th><th>Статус</th><th>Secret</th><th>Last check</th><th>Действия</th></tr></thead>
+          <tbody id="integrations-table-body"><tr><td colspan="7" style="color:var(--text-muted); padding:22px 12px;">Загрузка...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    """
+
 def get_html(ministers, initial_tab="home"):
     hierarchy = {
         "group_ministers": {
@@ -507,7 +795,7 @@ def get_html(ministers, initial_tab="home"):
             "subgroups": {
                 "sales": {"name": "Продажи", "icon": "trending-up", "items": ["Лиды", "Клиенты", "Диалоги", "Сделки", "Заказы", "КП", "Повторные продажи", "Sales Core"]},
                 "content": {"name": "Контент", "icon": "edit-3", "items": ["Контент-завод", "Темы", "Статьи", "Посты", "Публикации", "Комментарии", "Google-таблицы"]},
-                "marketing": {"name": "Маркетинг", "icon": "megaphone", "items": ["ЦА", "Боли", "УТП", "Офферы", "Воронки", "Источники трафика", "Реклама", "Упаковка продукта"]},
+                "marketing": {"name": "Маркетинг", "icon": "megaphone", "items": ["ЦА", "Боли", "УТП", "Офферы", "Воронки", "Источники трафика", "Реклама", "Креатив", "Упаковка продукта"]},
                 "analytics": {"name": "Аналитика", "icon": "bar-chart-2", "items": ["Дашборды", "Метрики", "План-факт", "Отчёты", "Ошибки данных", "Выводы и рекомендации"]},
                 "production": {"name": "Производство", "icon": "factory", "items": ["Заказы", "План", "Смены", "Операции", "Материалы", "Остатки", "Брак", "Загрузка"]},
                 "tech": {"name": "Техника", "icon": "cpu", "items": ["Сервер", "Скрипты", "Боты", "API", "Интеграции", "Воркфлоу", "Очереди", "Логи", "Ошибки"]},
@@ -534,7 +822,11 @@ def get_html(ministers, initial_tab="home"):
                 for item in s_data["items"]:
                     t_id = f"{s_id}_{item.replace(' ', '_').lower()}"
                     nav_html += f'<div class="nav-item" data-tab="{t_id}" onclick="showTab(\'{t_id}\')">{item}</div>'
-                    if s_id in ["marketing", "content"] or t_id == "tech_боты":
+                    if t_id == "tech_боты":
+                        sections_html += get_bots_section_html()
+                    elif t_id == "tech_интеграции":
+                        sections_html += get_integrations_section_html()
+                    elif s_id in ["marketing", "content"]:
                         sections_html += get_module_section_html(s_id, t_id, item)
                     else:
                         sections_html += f'<div id="{t_id}" class="section"><h2>{s_data["name"]} • {item}</h2><div class="card premium-glow"><h3>Модуль активен</h3><p>Ожидание потока данных из контура {s_id}.</p></div></div>'
@@ -844,6 +1136,7 @@ const MODULE_CONFIG = {{
   "marketing_воронки": {{ title: "Воронки", module: "marketing", section: "funnels", columns: ["Этап", "Вход", "Выход", "CR%", "Статус", "Комментарий"] }},
   "marketing_источники_трафика": {{ title: "ИсточникиТрафика", module: "marketing", section: "traffic_sources", columns: ["Канал", "Бюджет", "Лиды", "CPL", "Статус", "ROI"] }},
   "marketing_реклама": {{ title: "Реклама", module: "marketing", section: "campaigns", columns: ["Кампания", "Канал", "Бюджет", "Статус", "Ссылка"] }},
+  "marketing_креатив": {{ title: "Креатив", module: "marketing", section: "creatives", columns: ["Название", "Тип", "Канал", "Оффер", "Статус", "Конверсия"] }},
   "marketing_упаковка_продукта": {{ title: "УпаковкаПродукта", module: "marketing", section: "brand", columns: ["Параметр", "Значение", "Статус", "Комментарий"] }},
   "content_контент-завод": {{ title: "КонтентЗавод", module: "content", section: "topics", columns: ["Задача", "Статус", "Исполнитель"] }},
   "content_темы": {{ title: "Темы", module: "content", section: "topics", columns: ["Тема", "Приоритет", "Статус", "Дедлайн"] }},
@@ -851,8 +1144,7 @@ const MODULE_CONFIG = {{
   "content_посты": {{ title: "Посты", module: "content", section: "posts", columns: ["Текст", "Сеть", "Статус", "Дата"] }},
   "content_публикации": {{ title: "Публикации", module: "content", section: "publications", columns: ["Ресурс", "Ссылка", "Статус", "Дата"] }},
   "content_комментарии": {{ title: "Комментарии", module: "content", section: "comments", columns: ["Текст", "Где", "Статус", "Дата"] }},
-  "content_google-таблицы": {{ title: "GoogleТаблицы", module: "content", section: "sheets", columns: ["Название", "URL", "Статус", "Комментарий"] }},
-  "tech_боты": {{ title: "Боты", module: "tech", section: "bots", columns: ["Бот", "Платформа", "Назначение", "Статус", "Владелец", "Webhook", "Последняя проверка"] }}
+  "content_google-таблицы": {{ title: "GoogleТаблицы", module: "content", section: "sheets", columns: ["Название", "URL", "Статус", "Комментарий"] }}
 }};
 
 function saveState(t) {{ const groups = Array.from(document.querySelectorAll('.nav-group.open')).map(el => el.getAttribute('data-group')); const subs = Array.from(document.querySelectorAll('.sub-group.open')).map(el => el.getAttribute('data-subgroup')); localStorage.setItem(STATE_KEY, JSON.stringify({{ tab: t, groups, subs }})); }}
@@ -860,8 +1152,99 @@ function loadState() {{ const s = JSON.parse(localStorage.getItem(STATE_KEY) || 
 function goHome(e) {{ if (e) e.preventDefault(); showTab('home'); window.history.replaceState(null, '', '/agents'); }}
 function toggleGroup(id, force=false) {{ const el = document.querySelector(`.nav-group[data-group="${{id}}"]`); if (!el) return; if (!force && el.classList.contains('open')) return; document.querySelectorAll('.nav-group').forEach(g => g.classList.remove('open')); el.classList.add('open'); saveState(document.querySelector('.nav-item.active')?.getAttribute('data-tab')); }}
 function toggleSubGroup(id, force=false) {{ const el = document.querySelector(`.sub-group[data-subgroup="${{id}}"]`); if (!el) return; const wasOpen = el.classList.contains('open'); if (!force) {{ document.querySelectorAll('.sub-group').forEach(g => g.classList.remove('open')); if (!wasOpen) el.classList.add('open'); }} else el.classList.add('open'); saveState(document.querySelector('.nav-item.active')?.getAttribute('data-tab')); }}
-function showTab(id) {{ const target = document.getElementById(id); if (!target) return showTab('home'); document.querySelectorAll('.section').forEach(s => s.classList.remove('active')); document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active')); target.classList.add('active'); const nav = document.querySelector(`.nav-item[data-tab="${{id}}"]`); if (nav) nav.classList.add('active'); saveState(id); refreshData(id); if (MODULE_CONFIG[id]) initModuleTab(id); else closeMarketingPanel(); }}
+function showTab(id) {{ const target = document.getElementById(id); if (!target) return showTab('home'); document.querySelectorAll('.section').forEach(s => s.classList.remove('active')); document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active')); target.classList.add('active'); const nav = document.querySelector(`.nav-item[data-tab="${{id}}"]`); if (nav) nav.classList.add('active'); saveState(id); refreshData(id); if (id === 'tech_боты') loadBotsSection(); if (id === 'tech_интеграции') loadIntegrationsSection(); if (MODULE_CONFIG[id]) initModuleTab(id); else closeMarketingPanel(); }}
 async function refreshData(id) {{ if (id === 'wf_queues') {{ const r = await fetch('/api/tasks').then(r => r.json()); if (r.counts) document.getElementById('wf-counts').innerHTML = Object.entries(r.counts).map(([k,v]) => `<div class="stat-box"><div class="label">${{k}}</div><div class="val">${{v}}</div></div>`).join(''); }} if (id === 'kb_clients') refreshClients(); if (id === 'home') refreshHome(); const st = await fetch('/api/status').then(r => r.json()); document.getElementById('ts').innerText = st.generated_at || new Date().toISOString(); }}
+
+async function loadBotsSection() {{
+    const status = document.getElementById('bots-status');
+    const summary = document.getElementById('bots-summary');
+    const tbody = document.getElementById('bots-table-body');
+    if (!tbody) return;
+    if (status) status.innerText = 'Загрузка';
+    try {{
+        const r = await fetch('/api/system/bots').then(res => res.json());
+        const bots = r.data || [];
+        const running = bots.filter(b => b.runtime_status === 'running').length;
+        const noService = bots.filter(b => b.runtime_status === 'no_service').length;
+        const notRunning = bots.filter(b => b.runtime_status === 'not_running').length;
+        if (summary) summary.innerHTML = `
+          <div class="stat-box"><div class="label">Всего</div><div class="val">${{bots.length}}</div></div>
+          <div class="stat-box"><div class="label">Работают</div><div class="val">${{running}}</div></div>
+          <div class="stat-box"><div class="label">Нет service</div><div class="val">${{noService}}</div></div>
+          <div class="stat-box"><div class="label">Не running</div><div class="val">${{notRunning}}</div></div>
+        `;
+        if (!bots.length) {{
+            tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text-muted); padding:22px 12px;">В agent_registry нет TG-ботов</td></tr>';
+        }} else {{
+            tbody.innerHTML = bots.map(b => `
+              <tr>
+                <td><b>${{b.agent_id || b.agent_key || ''}}</b><div style="font-size:11px;color:var(--text-muted)">${{b.agent_key || ''}}</div></td>
+                <td>${{b.tg_bot || ''}}</td>
+                <td style="color:var(--text-muted)">${{b.role || ''}}</td>
+                <td>${{b.service || 'нет service'}}</td>
+                <td><span class="badge ${{b.runtime_status === 'running' ? 'badge-active' : (b.runtime_status === 'no_service' ? '' : 'badge-error')}}">${{b.runtime_status === 'running' ? 'running' : (b.runtime_status === 'no_service' ? 'service не найден' : b.active + ' / ' + b.sub)}}</span></td>
+              </tr>
+            `).join('');
+        }}
+        if (status) status.innerText = 'Источник: agent_registry + systemd';
+    }} catch (e) {{
+        tbody.innerHTML = '<tr><td colspan="5" style="color:var(--red); padding:22px 12px;">Ошибка загрузки /api/system/bots</td></tr>';
+        if (status) status.innerText = 'Ошибка';
+    }}
+}}
+
+async function loadIntegrationsSection() {{
+    const status = document.getElementById('integrations-status');
+    const summary = document.getElementById('integrations-summary');
+    const tbody = document.getElementById('integrations-table-body');
+    if (!tbody) return;
+    if (status) status.innerText = 'Загрузка';
+    try {{
+        const r = await fetch('/api/integrations').then(res => res.json());
+        const items = r.data || [];
+        const active = items.filter(x => x.status === 'active').length;
+        const needsSecret = items.filter(x => x.status === 'needs_secret').length;
+        const errors = items.filter(x => x.status === 'error').length;
+        if (summary) summary.innerHTML = `
+          <div class="stat-box"><div class="label">Всего</div><div class="val">${{items.length}}</div></div>
+          <div class="stat-box"><div class="label">Active</div><div class="val">${{active}}</div></div>
+          <div class="stat-box"><div class="label">Needs secret</div><div class="val">${{needsSecret}}</div></div>
+          <div class="stat-box"><div class="label">Error</div><div class="val">${{errors}}</div></div>
+        `;
+        if (!items.length) {{
+            tbody.innerHTML = '<tr><td colspan="7" style="color:var(--text-muted); padding:22px 12px;">Интеграции не заведены. Registry создан: _runtime/integrations/service_registry.json</td></tr>';
+        }} else {{
+            tbody.innerHTML = items.map(x => {{
+                const link = (x.account_url || (x.links && x.links[0]) || '').toString();
+                const statusClass = x.status === 'active' ? 'badge-active' : (x.status === 'error' ? 'badge-error' : '');
+                const secret = x.no_secret_required ? 'no_secret_required' : (x.secret_ref || 'needs_secret');
+                return `
+                  <tr>
+                    <td><b>${{x.platform || x.integration_id}}</b><div style="font-size:11px;color:var(--text-muted)">${{x.integration_id}}</div></td>
+                    <td>${{x.scope || ''}}</td>
+                    <td>${{link ? `<a href="${{link}}" target="_blank">${{x.account_name || link}}</a>` : (x.account_name || '')}}</td>
+                    <td><span class="badge ${{statusClass}}">${{x.status}}</span></td>
+                    <td style="color:var(--text-muted)">${{secret}}</td>
+                    <td style="color:var(--text-muted)">${{x.last_check_at || ''}} ${{x.last_check_result || ''}}</td>
+                    <td><button class="mkt-btn" onclick="checkIntegration('${{x.integration_id}}')">Проверить</button>${{link ? `<button class="mkt-btn" onclick="window.open('${{link}}','_blank')">Открыть</button>` : ''}}</td>
+                  </tr>
+                `;
+            }}).join('');
+        }}
+        if (status) status.innerText = 'Источник: ' + (r.source || '_runtime/integrations/service_registry.json');
+    }} catch (e) {{
+        tbody.innerHTML = '<tr><td colspan="7" style="color:var(--red); padding:22px 12px;">Ошибка загрузки /api/integrations</td></tr>';
+        if (status) status.innerText = 'Ошибка';
+    }}
+}}
+
+async function checkIntegration(id) {{
+    const status = document.getElementById('integrations-status');
+    if (status) status.innerText = 'Проверка';
+    const r = await fetch(`/api/integrations/${{id}}/check`, {{ method: 'POST' }}).then(res => res.json());
+    if (r.status !== 'ok') alert(r.message || 'Ошибка проверки');
+    loadIntegrationsSection();
+}}
 
 async function refreshHome() {{
     const r = await fetch('/api/home').then(r => r.json());
@@ -1375,12 +1758,14 @@ class Handler(BaseHTTPRequestHandler):
             "agents/marketing/funnels": "marketing_воронки",
             "agents/marketing/traffic": "marketing_источники_трафика",
             "agents/marketing/ads": "marketing_реклама",
+            "agents/marketing/creative": "marketing_креатив",
             "agents/marketing/packaging": "marketing_упаковка_продукта",
             "agents/tech/bots": "tech_боты",
+            "agents/tech/integrations": "tech_интеграции",
         }
         ministers = get_ministers_from_registry()
         valid = ["", "home", "agents", "login", "kb_docs", "kb_sop", "kb_clients", "kb_vector", "wf_templates", "wf_runs", "wf_queues", "wf_logs", "sys_users", "sys_roles", "sys_integrations", "sys_admin"]
-        valid += [f"{s}_{i.replace(' ', '_').lower()}" for s,d in {"sales":["Лиды","Клиенты","Диалоги","Сделки","Заказы","КП","Повторные продажи","Sales Core"],"content":["Контент-завод","Темы","Статьи","Посты","Публикации","Комментарии","Google-таблицы"],"marketing":["ЦА","Боли","УТП","Офферы","Воронки","Источники трафика","Реклама","Упаковка продукта"],"analytics":["Дашборды","Метрики","План-факт","Отчёты","Ошибки данных","Выводы и рекомендации"],"production":["Заказы","План","Смены","Операции","Материалы","Остатки","Брак","Загрузка"],"tech":["Сервер","Скрипты","Боты","API","Интеграции","Воркфлоу","Очереди","Логи","Ошибки"],"mgmt":["Финансы","Юрконтур","Консалтинг","PR","Задачи собственника","Стратегия","Документы"]}.items() for i in d]
+        valid += [f"{s}_{i.replace(' ', '_').lower()}" for s,d in {"sales":["Лиды","Клиенты","Диалоги","Сделки","Заказы","КП","Повторные продажи","Sales Core"],"content":["Контент-завод","Темы","Статьи","Посты","Публикации","Комментарии","Google-таблицы"],"marketing":["ЦА","Боли","УТП","Офферы","Воронки","Источники трафика","Реклама","Креатив","Упаковка продукта"],"analytics":["Дашборды","Метрики","План-факт","Отчёты","Ошибки данных","Выводы и рекомендации"],"production":["Заказы","План","Смены","Операции","Материалы","Остатки","Брак","Загрузка"],"tech":["Сервер","Скрипты","Боты","API","Интеграции","Воркфлоу","Очереди","Логи","Ошибки"],"mgmt":["Финансы","Юрконтур","Консалтинг","PR","Задачи собственника","Стратегия","Документы"]}.items() for i in d]
         if path in aliases:
             self._html(get_html(ministers, aliases[path]))
         elif path == "" or path in valid:
@@ -1391,6 +1776,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "api/home": self._json({"status": "ok", "data": get_home_snapshot()})
         elif path == "api/clients/summary": self._json({"status": "ok", "data": get_client_summary()})
         elif path == "api/clients/list": self._json({"status": "ok", "data": get_clients_detailed()})
+        elif path == "api/system/bots": self._json(get_bots_inventory())
+        elif path == "api/integrations": self._json(get_integrations_payload())
         elif path.startswith("api/module/"):
             parts = path.split("/")  # api/module/{cid}/{module}/{section}
             if len(parts) == 5:
@@ -1598,6 +1985,11 @@ class Handler(BaseHTTPRequestHandler):
                 elif action == "delete":
                     ok = module_delete_item(cid, module, section, body.get("id"))
                     self._json({"status": "ok"} if ok else {"status": "error", "message": "not found"})
+        elif path.startswith("api/integrations/") and path.endswith("/check"):
+            parts = path.split("/")
+            integration_id = parts[2] if len(parts) >= 4 else ""
+            ok = check_integration(integration_id)
+            self._json({"status": "ok"} if ok else {"status": "error", "message": "integration not found"}, 404 if not ok else 200)
         elif path == "api/marketing/export-sheet" or path.endswith("api/marketing/export-sheet"):
             client_id = str(body.get("client_id", "")).strip()
             tab_id = str(body.get("tab_id", "")).strip()
