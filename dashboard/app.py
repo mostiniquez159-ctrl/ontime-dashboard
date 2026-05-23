@@ -103,7 +103,7 @@ def get_clients_detailed():
             exec_pct = round((stats["done"] / stats["total"]) * 100)
             
         client_list.append({
-            "client_id": cid, "name": cdata.get("name", cid), "status": "active" if folder.exists() else "missing",
+            "client_id": cid, "name": cid, "status": "active" if folder.exists() else "missing",
             "prep_percent": prep_pct, "exec_percent": exec_pct,
             "done_count": stats["done"], "total_count": stats["total"],
             "missing_prep": m_prep,
@@ -168,36 +168,8 @@ def get_home_snapshot():
         "kpi_prep_avg": csum.get("prep_avg", 0),
         "kpi_exec_avg": csum.get("exec_avg", 0),
         "kpi_dead": q.get("dead", 0),
-        "recent_actions": recent_actions,
-        "agents": get_agents_snapshot()
+        "recent_actions": recent_actions
     }
-
-
-def get_agents_snapshot():
-    registry = _load_json(AGENT_REGISTRY, {})
-    total = 0
-    for cat in ["high_council", "ministers", "technicians", "workers", "unassigned"]:
-        v = registry.get(cat, [])
-        if isinstance(v, list):
-            total += len(v)
-    if isinstance(registry.get("bb"), dict) and "agent_id" in registry.get("bb", {}):
-        total += 1
-    elif isinstance(registry.get("bb"), list):
-        total += len(registry.get("bb", []))
-
-    # Считаем активные через systemd
-    active = 0
-    try:
-        out = subprocess.check_output(
-            ["systemctl", "list-units", "--state=active", "--no-legend",
-             "--type=service", "agent-v2-*"],
-            stderr=subprocess.DEVNULL, text=True
-        )
-        active = len([l for l in out.strip().splitlines() if l.strip()])
-    except Exception:
-        active = 0
-
-    return {"total": total, "active": active}
 
 def get_client_details(client_id):
     detailed = get_clients_detailed()
@@ -358,14 +330,6 @@ h2 {{ font-size: 28px; font-weight: 800; margin-bottom: 32px; }}
         <div class="stat-box home-card"><div class="label">Задачи</div><div class="val" id="home-tasks">0</div></div>
         <div class="stat-box home-card"><div class="label">Риски</div><div class="val color-red" id="home-risks">0</div></div>
         <div class="stat-box home-card"><div class="label">Уведомления</div><div class="val color-yellow" id="home-notifications">0</div></div>
-        <div class="stat-box home-card">
-          <div class="label">Агентов всего</div>
-          <div class="val" id="home-agents-total">0</div>
-        </div>
-        <div class="stat-box home-card">
-          <div class="label">Агентов активны</div>
-          <div class="val color-red" id="home-agents-active">0</div>
-        </div>
         <div class="card home-wide">
           <h3 style="margin-bottom:12px">Ключевые показатели</h3>
           <div style="display:grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap:12px;">
@@ -383,9 +347,9 @@ h2 {{ font-size: 28px; font-weight: 800; margin-bottom: 32px; }}
     <div id="wf_queues" class="section"><h2>Очереди</h2><div class="stats-grid" id="wf-counts"></div></div>
     {sections_html}
   </main>
-  <div id="client-panel">
-    <div class="panel-close" onclick="closeClientPanel()"><i data-feather="x"></i></div>
-    <div id="panel-content">
+      <div id="client-panel">
+      <div class="panel-close" onclick="closeClientPanel()"><i data-feather="x"></i></div>
+      <div id="panel-content">
     <div style="display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:8px">
       <button class="tab-btn active" onclick="switchTab('tab-main')" id="tbtn-main"
         style="padding:6px 14px;border:none;cursor:pointer;border-radius:8px;font-size:12px;font-weight:700;background:var(--accent);color:#fff">
@@ -397,7 +361,6 @@ h2 {{ font-size: 28px; font-weight: 800; margin-bottom: 32px; }}
       </button>
     </div>
     <div id="tab-main">
-
       <h2 id="p-name">Client</h2>
       <div style="color:var(--text-muted);font-size:13px;margin-bottom:16px" id="p-client-id"></div>
       <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:24px">
@@ -447,8 +410,14 @@ h2 {{ font-size: 28px; font-weight: 800; margin-bottom: 32px; }}
         <div id="p-task-result" style="margin-top:8px;font-size:12px"></div>
       </div>
     </div>
-  </div>
-<script>
+    <div id="tab-docs" style="display:none">
+      <div id="p-doc-list" style="margin-bottom:12px"></div>
+      <div id="p-doc-content" style="font-size:13px;line-height:1.6;white-space:pre-wrap;
+        background:var(--surface);border-radius:12px;padding:16px;color:var(--text-muted);
+        max-height:60vh;overflow-y:auto">Выбери документ слева</div>
+    </div>
+      </div>
+    </div><script>
 const STATE_KEY = 'ontime_v3_state';
 let allClients = [];
 function saveState(t) {{ const groups = Array.from(document.querySelectorAll('.nav-group.open')).map(el => el.getAttribute('data-group')); const subs = Array.from(document.querySelectorAll('.sub-group.open')).map(el => el.getAttribute('data-subgroup')); localStorage.setItem(STATE_KEY, JSON.stringify({{ tab: t, groups, subs }})); }}
@@ -457,7 +426,6 @@ function goHome(e) {{ if (e) e.preventDefault(); showTab('home'); window.history
 function toggleGroup(id, force=false) {{ const el = document.querySelector(`.nav-group[data-group="${{id}}"]`); if (!el) return; if (!force && el.classList.contains('open')) return; document.querySelectorAll('.nav-group').forEach(g => g.classList.remove('open')); el.classList.add('open'); saveState(document.querySelector('.nav-item.active')?.getAttribute('data-tab')); }}
 function toggleSubGroup(id, force=false) {{ const el = document.querySelector(`.sub-group[data-subgroup="${{id}}"]`); if (!el) return; const wasOpen = el.classList.contains('open'); if (!force) {{ document.querySelectorAll('.sub-group').forEach(g => g.classList.remove('open')); if (!wasOpen) el.classList.add('open'); }} else el.classList.add('open'); saveState(document.querySelector('.nav-item.active')?.getAttribute('data-tab')); }}
 function showTab(id) {{ const target = document.getElementById(id); if (!target) return showTab('home'); document.querySelectorAll('.section').forEach(s => s.classList.remove('active')); document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active')); target.classList.add('active'); const nav = document.querySelector(`.nav-item[data-tab="${{id}}"]`); if (nav) nav.classList.add('active'); saveState(id); refreshData(id); }}
-async function refreshData(id) {{ if (id === 'wf_queues') {{ const r = await fetch('/api/tasks').then(r => r.json()); if (r.counts) document.getElementById('wf-counts').innerHTML = Object.entries(r.counts).map(([k,v]) => `<div class="stat-box"><div class="label">${{k}}</div><div class="val">${{v}}</div></div>`).join(''); }} if (id === 'kb_clients') refreshClients(); const st = await fetch('/api/status').then(r => r.json()); document.getElementById('ts').innerText = st.generated_at || new Date().toISOString(); }}
 async function refreshData(id) {{ if (id === 'wf_queues') {{ const r = await fetch('/api/tasks').then(r => r.json()); if (r.counts) document.getElementById('wf-counts').innerHTML = Object.entries(r.counts).map(([k,v]) => `<div class="stat-box"><div class="label">${{k}}</div><div class="val">${{v}}</div></div>`).join(''); }} if (id === 'kb_clients') refreshClients(); if (id === 'home') refreshHome(); const st = await fetch('/api/status').then(r => r.json()); document.getElementById('ts').innerText = st.generated_at || new Date().toISOString(); }}
 
 async function refreshHome() {{
@@ -470,12 +438,6 @@ async function refreshHome() {{
     document.getElementById('home-kpi-prep').innerText = (d.kpi_prep_avg ?? 0) + '%';
     document.getElementById('home-kpi-exec').innerText = (d.kpi_exec_avg ?? 0) + '%';
     document.getElementById('home-kpi-dead').innerText = d.kpi_dead ?? 0;
-    const agTotal = d.agents?.total ?? 0;
-    const agActive = d.agents?.active ?? 0;
-    document.getElementById('home-agents-total').innerText = agTotal;
-    const agEl = document.getElementById('home-agents-active');
-    agEl.innerText = agActive;
-    agEl.className = 'val ' + (agActive > 0 ? 'color-green' : 'color-red');
     const recent = d.recent_actions || [];
     const recentHtml = recent.length
       ? recent.map(x => `<li class="recent-item"><div><b>${{x.task_id}}</b><div class="recent-meta">${{x.client_id}} • ${{x.task_type}}</div></div><div class="recent-meta">${{x.ts}}</div></li>`).join('')
@@ -502,36 +464,21 @@ async function refreshClients() {{
 function renderClients(list) {{
     const tbody = document.getElementById('clients-table-body');
     tbody.innerHTML = list.map(c => `<tr onclick="openClient('${{c.client_id}}')" style="cursor:pointer">
-        <td><b>${{c.name}}</b><div style="font-size:11px;color:var(--text-muted)">${{c.client_id}}</div></td>
+        <td><b>${{c.client_id}}</b></td>
         <td class="kpi-val ${{getColor(c.prep_percent)}}">${{c.prep_percent}}%</td>
         <td class="kpi-val ${{getColor(c.exec_percent)}}">${{c.exec_percent}}%</td>
         <td style="color:var(--text-muted)">${{c.done_count}} / ${{c.total_count}}</td>
         <td><span class="badge badge-active">${{c.status}}</span></td>
         <td><button class="nav-item active" style="padding:4px 10px; font-size:10px; border:none" onclick="event.stopPropagation(); openClient('${{c.client_id}}')">ОТКРЫТЬ</button></td>
     </tr>`).join('');
-    
-    // docs
-    fetch("/api/clients/" + cid + "/docs").then(r=>r.json()).then(r => {{
-        const el = document.getElementById('p-doc-list');
-        if (!r.data || !r.data.length) {{ el.innerHTML = '<span style="color:var(--text-muted)">Нет документов</span>'; return; }}
-        el.innerHTML = r.data.map((d,i) =>
-            '<div onclick="showDoc(this.getAttribute(\'data-content\'))" ' +
-              'data-content="' + d.content.replace(/"/g,'&quot;') + '" ' +
-              'style="padding:8px 12px;cursor:pointer;border-radius:8px;font-size:12px;' +
-              'margin-bottom:4px;background:var(--surface);border:1px solid var(--border)">' +
-              d.name +
-            '</div>').join('');
-        if (r.data[0]) showDoc(r.data[0].content);
-    }});
-    switchTab('tab-main');
-
     feather.replace();
 }}
 function filterClients() {{
     const q = document.getElementById('client-search').value.toLowerCase();
-    const filtered = allClients.filter(c => c.client_id.toLowerCase().includes(q) || (c.name||'').toLowerCase().includes(q));
+    const filtered = allClients.filter(c => c.client_id.toLowerCase().includes(q));
     renderClients(filtered);
 }}
+
 async function openClient(cid) {{
     const r = await fetch(`/api/clients/${{cid}}`).then(r => r.json());
     if (r.status !== 'ok') return;
@@ -555,14 +502,7 @@ async function openClient(cid) {{
               <b>${{t.task_id}}</b>
               <span style="color:var(--text-muted)"> · ${{t.minister}} · ${{t.task_type}}</span>
               <span style="float:right;font-size:11px;color:var(--text-muted)">${{t.state}} · ${{t.ts}}</span>
-            
-    </div>
-    <div id="tab-docs" style="display:none">
-      <div id="p-doc-list" style="margin-bottom:12px"></div>
-      <div id="p-doc-content" style="font-size:13px;line-height:1.6;white-space:pre-wrap;
-        background:var(--surface);border-radius:12px;padding:16px;color:var(--text-muted);
-        max-height:60vh;overflow-y:auto">Выбери документ слева</div>
-    </div></div>`).join('');
+            </div>`).join('');
     }});
 
     // log
@@ -581,18 +521,17 @@ async function openClient(cid) {{
             : '<span>Нет проектов</span>';
     }});
 
-    
     // docs
-    fetch("/api/clients/" + cid + "/docs").then(r=>r.json()).then(r => {{
+    fetch(`/api/clients/${{cid}}/docs`).then(r=>r.json()).then(r => {{
         const el = document.getElementById('p-doc-list');
-        if (!r.data || !r.data.length) {{ el.innerHTML = '<span style="color:var(--text-muted)">Нет документов</span>'; return; }}
+        if (!r.data?.length) {{ el.innerHTML = '<span style="color:var(--text-muted)">Нет документов</span>'; return; }}
         el.innerHTML = r.data.map((d,i) =>
-            '<div onclick="showDoc(this.getAttribute(\'data-content\'))" ' +
-              'data-content="' + d.content.replace(/"/g,'&quot;') + '" ' +
-              'style="padding:8px 12px;cursor:pointer;border-radius:8px;font-size:12px;' +
-              'margin-bottom:4px;background:var(--surface);border:1px solid var(--border)">' +
-              d.name +
-            '</div>').join('');
+            `<div onclick="showDoc(this.getAttribute('data-content'))"
+              data-content="${{d.content.replace(/"/g,'&quot;')}}"
+              style="padding:8px 12px;cursor:pointer;border-radius:8px;font-size:12px;
+              margin-bottom:4px;background:var(--surface);border:1px solid var(--border)">
+              ${{d.name}}
+            </div>`).join('');
         if (r.data[0]) showDoc(r.data[0].content);
     }});
     switchTab('tab-main');
@@ -622,7 +561,114 @@ async function submitClientTask() {{
         res.style.color = 'var(--red)';
     }}
 }}
+`).then(r => r.json());
+    if (r.status !== 'ok') return;
+    const c = r.data;
+    document.getElementById('p-name').innerText = c.name;
+    document.getElementById('p-client-id').innerText = 'ID: ' + c.client_id;
+    document.getElementById('p-prep').innerText = c.prep_percent + '%';
+    document.getElementById('p-prep').className = 'val ' + getColor(c.prep_percent);
+    document.getElementById('p-done').innerText = c.done_count;
+    document.getElementById('p-minister').setAttribute('data-client', cid);
+    document.getElementById('client-panel').classList.add('open');
 
+    // tasks
+    fetch(`/api/clients/${{cid}}/tasks`).then(r=>r.json()).then(r => {{
+        const el = document.getElementById('p-tasks');
+        if (!r.data?.length) {{ el.innerText = 'Нет задач'; return; }}
+        const inprog = r.data.filter(t => t.state !== 'done').length;
+        document.getElementById('p-inprogress').innerText = inprog;
+        el.innerHTML = r.data.slice(0,8).map(t =>
+            `<div style="padding:6px 0;border-bottom:1px solid var(--border)">
+              <b>${{t.task_id}}</b>
+              <span style="color:var(--text-muted)"> · ${{t.minister}} · ${{t.task_type}}</span>
+              <span style="float:right;font-size:11px;color:var(--text-muted)">${{t.state}} · ${{t.ts}}</span>
+            </div>`).join('');
+    }});
+
+    // log
+    fetch(`/api/clients/${{cid}}/log`).then(r=>r.json()).then(r => {{
+        const el = document.getElementById('p-log');
+        el.innerHTML = r.data?.length
+            ? r.data.map(l=>`<div style="padding:4px 0;border-bottom:1px solid var(--border);font-size:12px">${{l}}</div>`).join('')
+            : '<span>Нет записей</span>';
+    }});
+
+    // projects
+    fetch(`/api/clients/${{cid}}/projects`).then(r=>r.json()).then(r => {{
+        const el = document.getElementById('p-projects');
+        el.innerHTML = r.data?.length
+            ? r.data.map(p=>`<span style="display:inline-block;margin:3px;padding:3px 10px;background:var(--surface);border-radius:8px;font-size:12px">${{p}}</span>`).join('')
+            : '<span>Нет проектов</span>';
+    }});
+
+    // docs
+    fetch(`/api/clients/${{cid}}/docs`).then(r=>r.json()).then(r => {{
+        const el = document.getElementById('p-doc-list');
+        if (!r.data?.length) {{ el.innerHTML = '<span style="color:var(--text-muted)">Нет документов</span>'; return; }}
+        el.innerHTML = r.data.map((d,i) =>
+            `<div onclick="showDoc(this.getAttribute('data-content'))"
+              data-content="${{d.content.replace(/"/g,'&quot;')}}"
+              style="padding:8px 12px;cursor:pointer;border-radius:8px;font-size:12px;
+              margin-bottom:4px;background:var(--surface);border:1px solid var(--border)">
+              ${{d.name}}
+            </div>`).join('');
+        if (r.data[0]) showDoc(r.data[0].content);
+    }});
+    switchTab('tab-main');
+
+    feather.replace();
+}}
+
+async function submitClientTask() {{
+    const cid = document.getElementById('p-minister').getAttribute('data-client');
+    const minister = document.getElementById('p-minister').value;
+    const text = document.getElementById('p-task-text').value.trim();
+    const res = document.getElementById('p-task-result');
+    if (!minister) {{ res.innerText = 'Выбери министерство'; res.style.color='var(--red)'; return; }}
+    if (!text) {{ res.innerText = 'Напиши задачу'; res.style.color='var(--red)'; return; }}
+    res.innerText = 'Отправляю...'; res.style.color='var(--text-muted)';
+    const r = await fetch('/api/tasks/create', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{client_id: cid, minister, task_type: 'manual', description: text}})
+    }}).then(r=>r.json());
+    if (r.status === 'ok') {{
+        res.innerText = '✓ Задача ' + r.task_id + ' создана';
+        res.style.color = 'var(--green)';
+        document.getElementById('p-task-text').value = '';
+    }} else {{
+        res.innerText = 'Ошибка: ' + (r.message || 'неизвестно');
+        res.style.color = 'var(--red)';
+    }}
+}}`).then(r => r.json());
+    if (r.status === 'ok') {{
+        const c = r.data;
+        document.getElementById('p-name').innerText = c.name;
+        document.getElementById('p-client-id').innerText = 'ID: ' + c.client_id;
+        document.getElementById('p-prep').innerText = c.prep_percent + '%';
+        document.getElementById('p-prep').className = 'val ' + getColor(c.prep_percent);
+        document.getElementById('p-exec').innerText = c.exec_percent + '%';
+        document.getElementById('p-exec').className = 'val ' + getColor(c.exec_percent);
+        document.getElementById('p-done').innerText = c.done_count;
+        document.getElementById('p-total').innerText = c.total_count;
+        
+        let gaps = '';
+        if (c.missing_prep.length > 0) {{
+            gaps += '<h4>Подготовка:</h4><ul class="gap-list">' + c.missing_prep.map(g => `<li class="gap-item"><i data-feather="x-circle"></i> ${{g}}</li>`).join('') + '</ul>';
+        }}
+        if (c.total_count === 0) {{
+            gaps += '<h4 style="margin-top:16px">Реализация:</h4><ul class="gap-list"><li class="gap-item"><i data-feather="x-circle"></i> Нет ни одной задачи в очереди</li></ul>';
+        }} else if (c.done_count < c.total_count) {{
+            gaps += '<h4 style="margin-top:16px">Реализация:</h4><ul class="gap-list"><li class="gap-item"><i data-feather="x-circle"></i> ${{c.total_count - c.done_count}} задач не завершены</li></ul>';
+        }}
+        if (gaps === '') gaps = '<p style="color:var(--green)">✅ 100% Готовность</p>';
+        document.getElementById('p-gaps').innerHTML = gaps;
+        
+        document.getElementById('client-panel').classList.add('open');
+        feather.replace();
+    }}
+}}
 function switchTab(id) {{
     ['tab-main','tab-docs'].forEach(t => {{
         document.getElementById(t).style.display = t===id ? 'block' : 'none';
@@ -703,7 +749,16 @@ class Handler(BaseHTTPRequestHandler):
                     raw = log_path.read_text(encoding="utf-8")
                     lines = [l for l in raw.splitlines() if l.startswith("## ")][:5]
                 self._json({"status": "ok", "data": lines})
-            
+            elif len(parts) == 4 and parts[3] == "projects":
+                cid = parts[2]
+                registry = _load_json(CLIENT_REGISTRY, {}).get("clients", {})
+                cdata = registry.get(cid, {})
+                folder = Path(cdata.get("folder", ""))
+                proj_dir = folder / "projects"
+                projects = []
+                if proj_dir.exists():
+                    projects = [d.name for d in proj_dir.iterdir() if d.is_dir()]
+                self._json({"status": "ok", "data": projects})
             elif len(parts) == 4 and parts[3] == "docs":
                 cid = parts[2]
                 registry = _load_json(CLIENT_REGISTRY, {}).get("clients", {})
@@ -718,21 +773,10 @@ class Handler(BaseHTTPRequestHandler):
                     d = folder / sub
                     if d.exists():
                         for f in sorted(d.glob("*.md"))[:10]:
-                            docs.append({"name": sub + "/" + f.name, "path": sub + "/" + f.name,
+                            docs.append({"name": f"{sub}/{f.name}", "path": f"{sub}/{f.name}",
                                 "content": f.read_text(encoding="utf-8")[:3000]})
                 self._json({"status": "ok", "data": docs})
-            elif len(parts) == 4 and parts[3] == "projects":
-                cid = parts[2]
-                registry = _load_json(CLIENT_REGISTRY, {}).get("clients", {})
-                cdata = registry.get(cid, {})
-                folder = Path(cdata.get("folder", ""))
-                proj_dir = folder / "projects"
-                projects = []
-                if proj_dir.exists():
-                    projects = [d.name for d in proj_dir.iterdir() if d.is_dir()]
-                self._json({"status": "ok", "data": projects})
-            else: self._json({"status": "error", "message": "not found"}, 404)
-        else: self._json({"error": "not found"}, 404)
+            else: self._json({"error": "not found"}, 404)
 
     def do_POST(self):
         url = urlparse(self.path); path = url.path.strip("/")
@@ -747,6 +791,7 @@ class Handler(BaseHTTPRequestHandler):
             if not client_id or not minister or not description:
                 self._json({"status": "error", "message": "client_id, minister, description required"}, 400)
                 return
+            import uuid
             task_id = f"TASK-{uuid.uuid4().hex[:8].upper()}"
             payload = {
                 "task_id": task_id,
