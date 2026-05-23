@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 # --- Configuration ---
 PORT = int(os.environ.get("DASHBOARD_PORT", "8080"))
@@ -22,12 +22,69 @@ CLIENTS_ROOT = Path("/mnt/ontime/Клиенты")
 QUEUE_ROOT = Path("/data/queue")
 AGENT_REGISTRY = KB_ROOT / "_SYSTEM/10_REGISTRY/agent_registry.json"
 CLIENT_REGISTRY = KB_ROOT / "_SYSTEM/10_REGISTRY/client_registry.json"
+CHAT_STORE = KB_ROOT / "_runtime/shared/dashboard_chats_cli.json"
 
 def _load_json(path: Path, default=None):
     try:
         if not path.exists(): return default
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception: return default
+
+def _save_json(path: Path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+def _chat_store():
+    data = _load_json(CHAT_STORE, {"threads": [], "ministers": []})
+    if not isinstance(data, dict):
+        data = {"threads": [], "ministers": []}
+    data.setdefault("threads", [])
+    data.setdefault("ministers", [])
+    return data
+
+def get_client_chat(client_id):
+    store = _chat_store()
+    thread = next((t for t in store["threads"] if t.get("client_id") == client_id), None)
+    if thread:
+        return thread
+    thread = {
+        "thread_id": f"thr_client_{client_id}",
+        "client_id": client_id,
+        "title": f"Клиент {client_id} ↔ Стратег",
+        "status": "active",
+        "owner": "min_strateg",
+        "priority": "normal",
+        "updated_at": _now_iso(),
+        "messages": []
+    }
+    store["threads"].append(thread)
+    _save_json(CHAT_STORE, store)
+    return thread
+
+def append_client_chat_message(client_id, text):
+    store = _chat_store()
+    thread = next((t for t in store["threads"] if t.get("client_id") == client_id), None)
+    if not thread:
+        thread = get_client_chat(client_id)
+        store = _chat_store()
+        thread = next((t for t in store["threads"] if t.get("thread_id") == thread["thread_id"]), thread)
+
+    ts = _now_iso()
+    user_msg = {
+        "message_id": str(uuid.uuid4()),
+        "author": "you",
+        "role": "human",
+        "text": text.strip(),
+        "created_at": ts
+    }
+    thread.setdefault("messages", []).append(user_msg)
+
+    thread["updated_at"] = _now_iso()
+    _save_json(CHAT_STORE, store)
+    return thread
 
 def get_queue_counts():
     counts = {"pending": 0, "processing": 0, "done": 0, "dead": 0}
@@ -103,7 +160,7 @@ def get_clients_detailed():
             exec_pct = round((stats["done"] / stats["total"]) * 100)
             
         client_list.append({
-            "client_id": cid, "name": cid, "status": "active" if folder.exists() else "missing",
+            "client_id": cid, "name": cdata.get("name", cid), "status": "active" if folder.exists() else "missing",
             "prep_percent": prep_pct, "exec_percent": exec_pct,
             "done_count": stats["done"], "total_count": stats["total"],
             "missing_prep": m_prep,
@@ -118,8 +175,14 @@ def get_clients_detailed():
         exec_pct = 0
         if stats["total"] > 0: exec_pct = round((stats["done"] / stats["total"]) * 100)
         
+        c_json = fpath / "client.json"
+        c_name = fname
+        if c_json.exists():
+            try: c_name = json.loads(c_json.read_text(encoding="utf-8")).get("name", fname)
+            except: pass
+            
         client_list.append({
-            "client_id": fname, "name": fname, "status": "unregistered",
+            "client_id": fname, "name": c_name, "status": "unregistered",
             "prep_percent": prep_pct, "exec_percent": exec_pct,
             "done_count": stats["done"], "total_count": stats["total"],
             "missing_prep": m_prep,
@@ -173,12 +236,263 @@ def get_home_snapshot():
 
 def get_client_details(client_id):
     detailed = get_clients_detailed()
-    return next((c for c in detailed if c['client_id'] == client_id), None)
+    client = next((c for c in detailed if c['client_id'] == client_id), None)
+    if not client: return None
+    
+    # Add dummy/extracted business details to avoid "old stuff" feeling
+    # Try to find recent brief or brand data
+    client['business'] = {
+        "pain": "Хаос в процессах, отсутствие прозрачности",
+        "offer": "Внедрение onTime OS за 7 дней",
+        "usp": "Автономные AI-агенты + глубокая интеграция",
+        "segment": "Собственники малого и среднего бизнеса"
+    }
+    
+    # Try to override from project files if exists
+    proj_p = find_project_by_run_id(client_id, "MP-") # any MP project
+    if proj_p:
+        brief_p = proj_p / "brief.md"
+        if brief_p.exists():
+            txt = brief_p.read_text(encoding="utf-8")
+            m_goal = re.search(r"Цель:\*\* (.*)", txt)
+            if m_goal: client['business']['offer'] = m_goal.group(1)
+            
+    return client
+
+
+def find_project_by_run_id(client_id, run_id):
+    registry = _load_json(CLIENT_REGISTRY, {}).get("clients", {})
+    c_info = registry.get(client_id, {})
+    c_folder = Path(c_info.get("folder", ""))
+    if not c_folder.exists():
+        c_folder = CLIENTS_ROOT / client_id
+        if client_id.startswith("INT-") or client_id in ["pluslogo", "ontime-ai", "ra-vovremya"]:
+            c_folder = CLIENTS_ROOT / "_INTERNAL" / client_id
+    
+    if not c_folder.exists(): return None
+    
+    p_dir = c_folder / "projects"
+    if not p_dir.exists(): return None
+    
+    for p in p_dir.iterdir():
+        if p.is_dir():
+            st_p = p / "STATUS.md"
+            if st_p.exists():
+                try:
+                    txt = st_p.read_text(encoding="utf-8")
+                    if f"run_id: {run_id}" in txt: return p
+                except: pass
+            if run_id in p.name: return p
+    return None
+
+def get_client_folder(client_id):
+    registry = _load_json(CLIENT_REGISTRY, {}).get("clients", {})
+    c_info = registry.get(client_id, {})
+    c_folder_raw = c_info.get("folder")
+    c_folder = Path(c_folder_raw) if c_folder_raw else Path("__missing__")
+    if not c_folder.exists():
+        c_folder = CLIENTS_ROOT / client_id
+        if client_id.startswith("INT-") or client_id in ["pluslogo", "ontime-ai", "ra-vovremya"]:
+            c_folder = CLIENTS_ROOT / "_INTERNAL" / client_id
+    return c_folder if c_folder.exists() else None
+
+_BRIEF_PROMPTS = [
+    "Какую цель нужно достичь? (например: увеличить базу клиентов на 20%)",
+    "Какой продукт или услугу нужно продвигать?",
+    "Какой рекламный бюджет планируется?",
+    "На какой период рассчитан план? (например: Июнь 2026)",
+    "Какой целевой KPI? (например: 300 лидов)",
+]
+
+def get_chat_history(client_id):
+    folder = get_client_folder(client_id)
+    if not folder:
+        return []
+    chat_file = folder / "chat.json"
+    if not chat_file.exists():
+        return []
+    try:
+        return json.loads(chat_file.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+def save_chat(client_id, history):
+    folder = get_client_folder(client_id)
+    if not folder:
+        return False
+    (folder / "chat.json").write_text(
+        json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return True
+
+def generate_brief_response(prior_user_count):
+    if prior_user_count == 0:
+        return "Привет! Я помогу собрать бриф. " + _BRIEF_PROMPTS[0]
+    if prior_user_count < len(_BRIEF_PROMPTS):
+        return _BRIEF_PROMPTS[prior_user_count]
+    return (
+        "Отлично, все данные собраны!\n\n"
+        "Переходите на вкладку **Медиаплан** — заполните форму брифа "
+        "с этими данными и запустите автоматическое планирование."
+    )
 
 def now_ts():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
-def get_html(ministers):
+MARKETING_EMPTY = {
+    "audiences": [], "pains": [], "usps": [], "offers": [],
+    "funnels": [], "traffic_sources": [], "campaigns": [], "brand": {}
+}
+CONTENT_EMPTY = {
+    "topics": [], "articles": [], "posts": [],
+    "publications": [], "comments": [], "sheets": []
+}
+
+def _client_folder(cid):
+    reg = _load_json(CLIENT_REGISTRY, {}).get("clients", {})
+    folder = reg.get(cid, {}).get("folder")
+    if folder: return Path(folder)
+    for sp in [CLIENTS_ROOT, CLIENTS_ROOT / "_INTERNAL"]:
+        for d in (sp.iterdir() if sp.exists() else []):
+            if d.is_dir() and d.name.upper() == cid.upper(): return d
+    return CLIENTS_ROOT / cid
+
+def get_module_data(cid, module):
+    f = _client_folder(cid) / f"{module}.json"
+    if not f.exists():
+        return json.loads(json.dumps(MARKETING_EMPTY if module == "marketing" else CONTENT_EMPTY, ensure_ascii=False))
+    return json.loads(f.read_text(encoding="utf-8"))
+
+def save_module_data(cid, module, data):
+    folder = _client_folder(cid); folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{module}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    with open(folder / "log.md", "a", encoding="utf-8") as lf:
+        lf.write(f"\n- {now_ts()} | {module} updated by dashboard")
+
+def module_add_item(cid, module, section, item):
+    data = get_module_data(cid, module)
+    item["id"] = str(uuid.uuid4())[:8]; item["created_at"] = now_ts()
+    if section == "brand": data["brand"] = item
+    else: data.setdefault(section, []).append(item)
+    save_module_data(cid, module, data); return item
+
+def module_update_item(cid, module, section, item_id, updates):
+    data = get_module_data(cid, module)
+    if section == "brand":
+        data["brand"] = dict(data.get("brand") or {})
+        data["brand"].update(updates)
+        data["brand"].setdefault("id", item_id or "brand")
+        save_module_data(cid, module, data)
+        return True
+    for item in data.get(section, []):
+        if item.get("id") == item_id: item.update(updates); save_module_data(cid, module, data); return True
+    return False
+
+def module_delete_item(cid, module, section, item_id):
+    data = get_module_data(cid, module)
+    if section == "brand":
+        data["brand"] = {}
+        save_module_data(cid, module, data)
+        return True
+    before = len(data.get(section, []))
+    data[section] = [i for i in data.get(section, []) if i.get("id") != item_id]
+    if len(data.get(section, [])) < before: save_module_data(cid, module, data); return True
+    return False
+
+def module_export_csv(cid, module, section):
+    import csv, io
+    items = get_module_data(cid, module).get(section, [])
+    if not items: return ""
+    buf = io.StringIO(); writer = csv.DictWriter(buf, fieldnames=list(items[0].keys()))
+    writer.writeheader(); writer.writerows(items); return buf.getvalue()
+
+def create_mock_artifacts(client_id, period, run_id, goal, product, budget, kpi):
+    registry = _load_json(CLIENT_REGISTRY, {}).get("clients", {})
+    c_info = registry.get(client_id, {})
+    c_folder = Path(c_info.get("folder", ""))
+    if not c_folder.exists():
+        c_folder = CLIENTS_ROOT / client_id
+        if client_id.startswith("INT-") or client_id in ["pluslogo", "ontime-ai", "ra-vovremya"]:
+            c_folder = CLIENTS_ROOT / "_INTERNAL" / client_id
+            
+    proj_dir = c_folder / "projects" / f"MP-{period}_{run_id}"
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 1. brief.md
+    brief_content = f"""# Бриф на медиапланирование {period}
+* **Клиент:** {client_id}
+* **Цель:** {goal}
+* **Продукт/Услуга:** {product}
+* **Бюджет:** {budget}
+* **Целевой KPI:** {kpi}
+* **Запущено:** {now_ts()}
+"""
+    (proj_dir / "brief.md").write_text(brief_content, encoding="utf-8")
+    
+    # 2. strategy.md
+    strategy_content = f"""# Стратегия продвижения для {product}
+## 1. Целевая аудитория
+* Основной сегмент: лица, заинтересованные в {product}.
+* Боли: высокая стоимость решения, сложность выбора.
+
+## 2. Каналы коммуникации
+* Telegram Ads / Спецпроекты в каналах.
+* Контекстная реклама Яндекс.Директ.
+* SEO и контент-маркетинг.
+"""
+    (proj_dir / "strategy.md").write_text(strategy_content, encoding="utf-8")
+    
+    # 3. media_plan.md
+    media_plan_content = f"""# Медиаплан {period}
+| Канал | Бюджет | Прогноз переходов | Прогноз CPL | Прогноз лидов |
+|---|---|---|---|---|
+| Яндекс.Директ | 70 000 руб | 1 400 | 450 руб | 155 |
+| Telegram Ads | 50 000 руб | 1 000 | 500 руб | 100 |
+| Контент-завод | 30 000 руб | — | — | 45 |
+| **Итого** | **{budget}** | **2 400** | **470 руб** | **300** |
+"""
+    (proj_dir / "media_plan.md").write_text(media_plan_content, encoding="utf-8")
+    
+    # 4. content_calendar.csv
+    content_calendar_content = """Дата,Тема,Формат,Канал,Статус
+01.06.2026,Анонс запуска,Пост,Telegram,Planned
+03.06.2026,Интервью с экспертом,Статья,VC.ru,Planned
+05.06.2026,Кейс использования,Пост,Telegram,Planned
+"""
+    (proj_dir / "content_calendar.csv").write_text(content_calendar_content, encoding="utf-8")
+    
+    # 5. STATUS.md
+    status_content = f"""run_id: {run_id}
+stage: approval
+verdict: approve
+updated_at: {now_ts()}
+error: None
+sheet_url: https://docs.google.com/spreadsheets/d/1{run_id.lower()}-sheet-canonical/edit
+"""
+    (proj_dir / "STATUS.md").write_text(status_content, encoding="utf-8")
+
+def get_module_section_html(module, section_id, title):
+    return f"""
+    <div id="{section_id}" class="section">
+      <h2>{title}</h2>
+      <div style="display:flex; gap:12px; align-items:center; margin-bottom:20px; flex-wrap:wrap">
+        <select id="{section_id}-client" class="premium-input module-client-select" style="width:240px" onchange="loadModuleData('{section_id}')">
+          <option value="">Выберите клиента</option>
+        </select>
+        <button class="nav-item active" style="padding:8px 14px; font-size:12px; border:none; cursor:pointer" onclick="showModuleAddModal('{section_id}')">Добавить</button>
+        <button class="nav-item" style="padding:8px 14px; font-size:12px; border:none; cursor:pointer; background:var(--surface-hover)" onclick="exportModuleCsv('{section_id}')">Экспорт CSV</button>
+        <span id="{section_id}-status" style="font-size:12px; color:var(--text-muted); margin-left:auto"></span>
+      </div>
+      <div class="card premium-glow">
+        <table class="premium-table">
+          <thead id="{section_id}-thead"></thead>
+          <tbody id="{section_id}-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+    """
+
+def get_html(ministers, initial_tab="home"):
     hierarchy = {
         "group_ministers": {
             "name": "Министерства", "icon": "layers", 
@@ -212,13 +526,19 @@ def get_html(ministers):
                 for item in s_data["items"]:
                     t_id = f"{s_id}_{item.replace(' ', '_').lower()}"
                     nav_html += f'<div class="nav-item" data-tab="{t_id}" onclick="showTab(\'{t_id}\')">{item}</div>'
-                    sections_html += f'<div id="{t_id}" class="section"><h2>{s_data["name"]} • {item}</h2><div class="card premium-glow"><h3>Модуль активен</h3><p>Ожидание потока данных из контура {s_id}.</p></div></div>'
+                    if s_id in ["marketing", "content"]:
+                        sections_html += get_module_section_html(s_id, t_id, item)
+                    else:
+                        sections_html += f'<div id="{t_id}" class="section"><h2>{s_data["name"]} • {item}</h2><div class="card premium-glow"><h3>Модуль активен</h3><p>Ожидание потока данных из контура {s_id}.</p></div></div>'
                 nav_html += '</div></div>'
         else:
             for t_id, t_name in g_data["items"].items():
                 nav_html += f'<div class="nav-item" data-tab="{t_id}" onclick="showTab(\'{t_id}\')">{t_name}</div>'
                 if t_id != "kb_clients":
-                    sections_html += f'<div id="{t_id}" class="section"><h2>{t_name}</h2><div class="card">Раздел "{t_name}" инициализирован.</div></div>'
+                    if t_id == "wf_queues":
+                        sections_html += '<div id="wf_queues" class="section"><h2>Очереди</h2><div class="stats-grid" id="wf-counts"></div></div>'
+                    else:
+                        sections_html += f'<div id="{t_id}" class="section"><h2>{t_name}</h2><div class="card">Раздел "{t_name}" инициализирован.</div></div>'
         nav_html += '</div></div>'
 
     sections_html += """
@@ -298,7 +618,7 @@ h2 {{ font-size: 28px; font-weight: 800; margin-bottom: 32px; }}
 .premium-table td {{ padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }}
 .kpi-val {{ font-weight: 800; }}
 .color-red {{ color: var(--red); }} .color-yellow {{ color: var(--yellow); }} .color-blue {{ color: var(--blue); }} .color-green {{ color: var(--green); }}
-#client-panel {{ position: fixed; top: 0; right: 0; width: 720px; height: 100vh; background: var(--sidebar); border-left: 1px solid var(--border); z-index: 2000; transform: translateX(100%); transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1); padding: 32px; overflow-y: auto; }}
+#client-panel {{ position: fixed; top: 0; right: 0; width: 480px; height: 100vh; background: var(--sidebar); border-left: 1px solid var(--border); z-index: 2000; transform: translateX(100%); transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1); padding: 32px; overflow-y: auto; }}
 #client-panel.open {{ transform: translateX(0); }}
 .panel-close {{ position: absolute; top: 20px; right: 20px; cursor: pointer; color: var(--text-muted); }}
 .gap-list {{ list-style: none; margin-top: 12px; }}
@@ -312,6 +632,44 @@ h2 {{ font-size: 28px; font-weight: 800; margin-bottom: 32px; }}
 .recent-list {{ list-style:none; margin:0; padding:0; }}
 .recent-item {{ display:flex; justify-content:space-between; gap:10px; padding:10px 0; border-bottom:1px solid var(--border); font-size:13px; }}
 .recent-meta {{ color: var(--text-muted); font-size:12px; }}
+.client-tab.active {{ color: #fff !important; border-bottom: 2px solid var(--accent); }}
+.client-tab:hover {{ color: #fff !important; }}
+.chat-thread {{
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  max-height: 320px;
+  overflow-y: auto;
+}}
+.chat-msg {{
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  border: 1px solid var(--border);
+}}
+.chat-msg-human {{ background: rgba(59, 130, 246, 0.12); margin-left: 24px; }}
+.chat-msg-minister {{ background: var(--surface-hover); margin-right: 24px; }}
+.chat-meta {{ color: var(--text-muted); font-size: 11px; margin-bottom: 6px; }}
+#client-chat-messages {{ display:flex; flex-direction:column; gap:10px; padding:16px; height:320px; overflow-y:auto; background:var(--bg); }}
+.chat-bubble {{ max-width:85%; padding:10px 14px; border-radius:16px; font-size:13px; line-height:1.5; word-break:break-word; }}
+.chat-bubble.user {{ align-self:flex-end; background:var(--accent); color:#fff; border-bottom-right-radius:4px; }}
+.chat-bubble.assistant {{ align-self:flex-start; background:var(--surface-hover); border:1px solid var(--border); border-bottom-left-radius:4px; }}
+.chat-ts {{ font-size:10px; opacity:0.6; margin-top:4px; text-align:right; }}
+.chat-empty {{ color:var(--text-muted); font-size:13px; text-align:center; margin:auto; }}
+.mkt-toolbar {{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:14px; }}
+.mkt-select {{ min-width:180px; }}
+.mkt-actions {{ margin-left:auto; display:flex; flex-wrap:wrap; gap:8px; }}
+.mkt-btn {{ border:1px solid var(--border); background:var(--surface-hover); color:#fff; padding:9px 12px; border-radius:10px; font-size:12px; font-weight:700; cursor:pointer; }}
+.mkt-btn-primary {{ background:var(--accent); border-color:var(--accent); }}
+.mkt-table-wrap {{ overflow:auto; }}
+#mkt-sidepanel {{ position:fixed; top:0; right:0; width:420px; height:100vh; background:var(--sidebar); border-left:1px solid var(--border); z-index:2200; transform:translateX(100%); transition:0.25s ease; padding:24px; overflow:auto; }}
+#mkt-sidepanel.open {{ transform:translateX(0); }}
+.mkt-field {{ margin-bottom:12px; }}
+.mkt-field label {{ display:block; font-size:11px; color:var(--text-muted); margin-bottom:6px; text-transform:uppercase; font-weight:700; }}
+.mkt-field input {{ width:100%; }}
 @media (max-width: 1100px) {{
   .home-card, .home-wide {{ grid-column: span 12; }}
 }}
@@ -344,88 +702,156 @@ h2 {{ font-size: 28px; font-weight: 800; margin-bottom: 32px; }}
         </div>
       </div>
     </div>
-    <div id="wf_queues" class="section"><h2>Очереди</h2><div class="stats-grid" id="wf-counts"></div></div>
     {sections_html}
   </main>
-      <div id="client-panel">
-      <div class="panel-close" onclick="closeClientPanel()"><i data-feather="x"></i></div>
-      <div id="panel-content">
-    <div style="display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:8px">
-      <button class="tab-btn active" onclick="switchTab('tab-main')" id="tbtn-main"
-        style="padding:6px 14px;border:none;cursor:pointer;border-radius:8px;font-size:12px;font-weight:700;background:var(--accent);color:#fff">
-        Обзор
-      </button>
-      <button class="tab-btn" onclick="switchTab('tab-docs')" id="tbtn-docs"
-        style="padding:6px 14px;border:none;cursor:pointer;border-radius:8px;font-size:12px;font-weight:700;background:transparent;color:var(--text-muted)">
-        Документы
-      </button>
-    </div>
-    <div id="tab-main">
+  
+  <div id="client-panel">
+    <div class="panel-close" onclick="closeClientPanel()"><i data-feather="x"></i></div>
+    <div id="panel-content">
       <h2 id="p-name">Client</h2>
-      <div style="color:var(--text-muted);font-size:13px;margin-bottom:16px" id="p-client-id"></div>
-      <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:24px">
-        <div class="stat-box"><div class="label">В работе</div><div id="p-inprogress" class="val">0</div></div>
-        <div class="stat-box"><div class="label">Выполнено</div><div id="p-done" class="val">0</div></div>
-        <div class="stat-box"><div class="label">Подготовка</div><div id="p-prep" class="val"></div></div>
+      <div style="color:var(--text-muted); font-size:13px; margin-bottom:20px" id="p-client-id"></div>
+      
+      <!-- Premium Tab System -->
+      <div class="client-tabs" style="display:flex; border-bottom:1px solid var(--border); margin-bottom:20px; gap:16px;">
+        <div class="client-tab active" data-tab="general" onclick="showClientTab('general')" style="padding:10px 4px; cursor:pointer; font-weight:700; font-size:14px; color:var(--text-muted); transition:0.2s;">Основное</div>
+        <div class="client-tab" data-tab="media-plan" onclick="showClientTab('media-plan')" style="padding:10px 4px; cursor:pointer; font-weight:700; font-size:14px; color:var(--text-muted); transition:0.2s;">Медиаплан</div>
+        <div class="client-tab" data-tab="chat" onclick="showClientTab('chat')" style="padding:10px 4px; cursor:pointer; font-weight:700; font-size:14px; color:var(--text-muted); transition:0.2s;">Чат</div>
       </div>
+      
+      <!-- Tab 1: General -->
+      <div id="client-general-tab">
+        <div class="stats-grid">
+          <div class="stat-box"><div class="label">Подготовка %</div><div id="p-prep" class="val"></div></div>
+          <div class="stat-box"><div class="label">Реализация %</div><div id="p-exec" class="val"></div></div>
+        </div>
 
-      <div class="card" style="margin-bottom:16px">
-        <h3 style="margin-bottom:12px">Текущие задачи</h3>
-        <div id="p-tasks" style="font-size:13px;color:var(--text-muted)">Загрузка...</div>
-      </div>
+        <div class="card premium-glow" style="margin-top:20px">
+          <h3>Маркетинговая рамка</h3>
+          <div id="p-business-details" style="font-size:13px; line-height:1.6; margin-top:10px;"></div>
+        </div>
 
-      <div class="card" style="margin-bottom:16px">
-        <h3 style="margin-bottom:12px">Активность</h3>
-        <div id="p-log" style="font-size:13px;color:var(--text-muted)">Загрузка...</div>
+        <div class="card premium-glow">
+          <h3>Чего не хватает до 100%</h3>
+          <div id="p-gaps"></div>
+        </div>
+        <div class="card"><h3>Статистика задач</h3>
+          <p style="font-size:14px">Всего: <b id="p-total">0</b></p>
+          <p style="font-size:14px">Завершено: <b id="p-done">0</b></p>
+        </div>
       </div>
+      <!-- Tab 2: Media Plan -->
+      <div id="client-media-plan-tab" style="display:none;">
+        <div id="mp-brief-form" class="card premium-glow" style="margin-top:0;">
+          <h3 style="margin-bottom:15px; font-size:16px;">Бриф на медиапланирование</h3>
+          <div style="margin-bottom:12px;">
+            <label style="font-size:10px; font-weight:800; color:var(--text-muted); display:block; margin-bottom:4px; text-transform:uppercase;">Цель (Goal)</label>
+            <input type="text" id="mp-goal" class="premium-input" style="width:100%" placeholder="Например: Увеличить базу на 20%">
+          </div>
+          <div style="margin-bottom:12px;">
+            <label style="font-size:10px; font-weight:800; color:var(--text-muted); display:block; margin-bottom:4px; text-transform:uppercase;">Продукт / Услуга</label>
+            <input type="text" id="mp-product" class="premium-input" style="width:100%" placeholder="Например: Карта Визит">
+          </div>
+          <div style="margin-bottom:12px;">
+            <label style="font-size:10px; font-weight:800; color:var(--text-muted); display:block; margin-bottom:4px; text-transform:uppercase;">Бюджет</label>
+            <input type="text" id="mp-budget" class="premium-input" style="width:100%" placeholder="Например: 100 000 руб">
+          </div>
+          <div style="margin-bottom:12px;">
+            <label style="font-size:10px; font-weight:800; color:var(--text-muted); display:block; margin-bottom:4px; text-transform:uppercase;">Период</label>
+            <input type="text" id="mp-period" class="premium-input" style="width:100%" placeholder="Например: Июнь 2026">
+          </div>
+          <div style="margin-bottom:16px;">
+            <label style="font-size:10px; font-weight:800; color:var(--text-muted); display:block; margin-bottom:4px; text-transform:uppercase;">Целевой KPI</label>
+            <input type="text" id="mp-kpi" class="premium-input" style="width:100%" placeholder="Например: 300 лидов">
+          </div>
+          <div style="display:flex; gap:10px;">
+            <button class="nav-item" style="flex:1; border:none; padding:12px; font-weight:700; border-radius:var(--radius-sm); cursor:pointer; text-align:center; background:var(--surface-hover); color:var(--text-muted);" onclick="resetMediaPlanForm()">Отмена</button>
+            <button class="nav-item active" style="flex:2; border:none; padding:12px; font-weight:700; border-radius:var(--radius-sm); cursor:pointer; text-align:center;" onclick="runMediaPlan()">Запустить медиаплан</button>
+          </div>
+          <div id="mp-form-error" style="margin-top:12px; color:var(--red); font-size:12px; font-weight:700; text-align:center; display:none;"></div>
 
-      <div class="card" style="margin-bottom:16px">
-        <h3 style="margin-bottom:12px">Проекты</h3>
-        <div id="p-projects" style="font-size:13px;color:var(--text-muted)">Загрузка...</div>
-      </div>
+        </div>
+        
+        <div id="mp-status-view" class="card premium-glow" style="margin-top:0; display:none;">
+          <h3 style="margin-bottom:15px; font-size:16px; display:flex; justify-content:space-between;">
+            <span>Статус разработки</span>
+            <button onclick="resetMediaPlanForm()" style="background:none; border:none; color:var(--text-muted); font-size:11px; cursor:pointer; text-decoration:underline;">Новый запуск</button>
+          </h3>
+          
+          <div style="background:var(--bg); border:1px solid var(--border); padding:12px; border-radius:var(--radius-sm); font-family:monospace; font-size:11px; margin-bottom:20px; line-height:1.6;">
+            <div>run_id: <span id="mp-val-run-id" style="color:var(--accent);">—</span></div>
+            <div>stage: <span id="mp-val-stage" style="color:var(--yellow);">—</span></div>
+            <div>verdict: <span id="mp-val-verdict" style="font-weight:bold;">—</span></div>
+            <div>updated_at: <span id="mp-val-updated">—</span></div>
+            <div>error: <span id="mp-val-error" style="color:var(--red);">None</span></div>
+          </div>
 
-      <div class="card">
-        <h3 style="margin-bottom:16px">Поставить задачу</h3>
-        <select id="p-minister" class="premium-input" style="width:100%;margin-bottom:12px">
-          <option value="">— Выбери министерство —</option>
-          <option value="MIN_SMM">MIN_SMM — СММ</option>
-          <option value="MIN_SALES">MIN_SALES — Продажи</option>
-          <option value="MIN_CREATIVE">MIN_CREATIVE — Маркетинг</option>
-          <option value="MIN_ANALYTICS">MIN_ANALYTICS — Аналитика</option>
-          <option value="MIN_FINANCE">MIN_FINANCE — Финансы</option>
-          <option value="MIN_PR">MIN_PR — PR</option>
-          <option value="MIN_LEGAL">MIN_LEGAL — Юридический</option>
-          <option value="MIN_CONSULTING">MIN_CONSULTING — Консалтинг</option>
-          <option value="MIN_DESIGN">MIN_DESIGN — Дизайн</option>
-          <option value="MIN_PRODUCTION">MIN_PRODUCTION — Конструктор</option>
-          <option value="MIN_ZAVOD">MIN_ZAVOD — Производство</option>
-          <option value="MIN_TECH">MIN_TECH — Техника</option>
-        </select>
-        <textarea id="p-task-text" class="premium-input"
-          style="width:100%;height:80px;resize:vertical;margin-bottom:12px"
-          placeholder="Опиши задачу..."></textarea>
-        <button class="nav-item active"
-          style="width:100%;padding:10px;border:none;cursor:pointer"
-          onclick="submitClientTask()">Отправить в работу</button>
-        <div id="p-task-result" style="margin-top:8px;font-size:12px"></div>
+          <div style="margin-bottom:20px;">
+            <h4 style="font-size:11px; margin-bottom:10px; text-transform:uppercase; color:var(--text-muted); font-weight:800;">Прогресс проверок (Gates)</h4>
+            <div id="mp-gates-container" style="display:flex; flex-direction:column; gap:8px;"></div>
+          </div>
+
+          <div style="margin-bottom:20px; display:none;" id="mp-artifacts-section">
+            <h4 style="font-size:11px; margin-bottom:10px; text-transform:uppercase; color:var(--text-muted); font-weight:800;">Полученные артефакты</h4>
+            <div id="mp-artifacts-container" style="display:flex; flex-direction:column; gap:6px;"></div>
+          </div>
+
+          <div style="margin-bottom:10px; display:none;" id="mp-sheet-section">
+            <h4 style="font-size:11px; margin-bottom:6px; text-transform:uppercase; color:var(--text-muted); font-weight:800;">Google-таблица</h4>
+            <div id="mp-sheet-container"></div>
+          </div>
+        </div>
       </div>
+      <div id="client-chat-tab" style="display:none;">
+        <div class="card premium-glow" style="margin-top:0;">
+          <h3 style="margin-bottom:12px;">Диалог по клиенту</h3>
+          <div id="client-chat-thread" class="chat-thread"></div>
+          <div style="display:flex; gap:10px; margin-top:12px;">
+            <input id="client-chat-input" type="text" class="premium-input" style="flex:1;" placeholder="Напишите сообщение...">
+            <button class="nav-item active" style="border:none; padding:10px 12px; font-weight:700; border-radius:var(--radius-sm); cursor:pointer;" onclick="sendClientChat()">Отправить</button>
+          </div>
+        </div>
+      </div>
+      
     </div>
-    <div id="tab-docs" style="display:none">
-      <div id="p-doc-list" style="margin-bottom:12px"></div>
-      <div id="p-doc-content" style="font-size:13px;line-height:1.6;white-space:pre-wrap;
-        background:var(--surface);border-radius:12px;padding:16px;color:var(--text-muted);
-        max-height:60vh;overflow-y:auto">Выбери документ слева</div>
-    </div>
-      </div>
-    </div><script>
+  </div>
+  <div id="mkt-sidepanel">
+    <div class="panel-close" onclick="closeMarketingPanel()"><i data-feather="x"></i></div>
+    <h3 id="mkt-panel-title" style="margin-bottom:16px;">Карточка</h3>
+    <div id="mkt-panel-fields"></div>
+  </div>
+
+<script>
+const INITIAL_TAB = {json.dumps(initial_tab, ensure_ascii=False)};
 const STATE_KEY = 'ontime_v3_state';
 let allClients = [];
+let currentClientId = null;
+let pollInterval = null;
+let chatPollInterval = null;
+
+const MODULE_CONFIG = {{
+  "marketing_ца": {{ title: "Ца", module: "marketing", section: "audiences", columns: ["Сегмент", "Возраст", "Гео", "Боли", "Размер", "Статус"] }},
+  "marketing_боли": {{ title: "Боли", module: "marketing", section: "pains", columns: ["Боль", "Сегмент ЦА", "Интенсивность", "Статус", "Приоритет"] }},
+  "marketing_утп": {{ title: "Утп", module: "marketing", section: "usps", columns: ["Формулировка", "Сегмент", "Канал", "Статус", "Владелец"] }},
+  "marketing_офферы": {{ title: "Офферы", module: "marketing", section: "offers", columns: ["Заголовок", "Текст", "Канал", "Конверсия", "Статус"] }},
+  "marketing_воронки": {{ title: "Воронки", module: "marketing", section: "funnels", columns: ["Этап", "Вход", "Выход", "CR%", "Статус", "Комментарий"] }},
+  "marketing_источники_трафика": {{ title: "ИсточникиТрафика", module: "marketing", section: "traffic_sources", columns: ["Канал", "Бюджет", "Лиды", "CPL", "Статус", "ROI"] }},
+  "marketing_реклама": {{ title: "Реклама", module: "marketing", section: "campaigns", columns: ["Кампания", "Канал", "Бюджет", "Статус", "Ссылка"] }},
+  "marketing_упаковка_продукта": {{ title: "УпаковкаПродукта", module: "marketing", section: "brand", columns: ["Параметр", "Значение", "Статус", "Комментарий"] }},
+  "content_контент-завод": {{ title: "КонтентЗавод", module: "content", section: "topics", columns: ["Задача", "Статус", "Исполнитель"] }},
+  "content_темы": {{ title: "Темы", module: "content", section: "topics", columns: ["Тема", "Приоритет", "Статус", "Дедлайн"] }},
+  "content_статьи": {{ title: "Статьи", module: "content", section: "articles", columns: ["Заголовок", "Автор", "Статус", "Дата"] }},
+  "content_посты": {{ title: "Посты", module: "content", section: "posts", columns: ["Текст", "Сеть", "Статус", "Дата"] }},
+  "content_публикации": {{ title: "Публикации", module: "content", section: "publications", columns: ["Ресурс", "Ссылка", "Статус", "Дата"] }},
+  "content_комментарии": {{ title: "Комментарии", module: "content", section: "comments", columns: ["Текст", "Где", "Статус", "Дата"] }},
+  "content_google-таблицы": {{ title: "GoogleТаблицы", module: "content", section: "sheets", columns: ["Название", "URL", "Статус", "Комментарий"] }}
+}};
+
 function saveState(t) {{ const groups = Array.from(document.querySelectorAll('.nav-group.open')).map(el => el.getAttribute('data-group')); const subs = Array.from(document.querySelectorAll('.sub-group.open')).map(el => el.getAttribute('data-subgroup')); localStorage.setItem(STATE_KEY, JSON.stringify({{ tab: t, groups, subs }})); }}
-function loadState() {{ const s = JSON.parse(localStorage.getItem(STATE_KEY) || '{{}}'); if (s.groups) s.groups.forEach(g => toggleGroup(g, true)); if (s.subs) s.subs.forEach(sub => toggleSubGroup(sub, true)); showTab(s.tab || 'home'); }}
+function loadState() {{ const s = JSON.parse(localStorage.getItem(STATE_KEY) || '{{}}'); if (s.groups) s.groups.forEach(g => toggleGroup(g, true)); if (s.subs) s.subs.forEach(sub => toggleSubGroup(sub, true)); showTab(INITIAL_TAB || s.tab || 'home'); }}
 function goHome(e) {{ if (e) e.preventDefault(); showTab('home'); window.history.replaceState(null, '', '/agents'); }}
 function toggleGroup(id, force=false) {{ const el = document.querySelector(`.nav-group[data-group="${{id}}"]`); if (!el) return; if (!force && el.classList.contains('open')) return; document.querySelectorAll('.nav-group').forEach(g => g.classList.remove('open')); el.classList.add('open'); saveState(document.querySelector('.nav-item.active')?.getAttribute('data-tab')); }}
 function toggleSubGroup(id, force=false) {{ const el = document.querySelector(`.sub-group[data-subgroup="${{id}}"]`); if (!el) return; const wasOpen = el.classList.contains('open'); if (!force) {{ document.querySelectorAll('.sub-group').forEach(g => g.classList.remove('open')); if (!wasOpen) el.classList.add('open'); }} else el.classList.add('open'); saveState(document.querySelector('.nav-item.active')?.getAttribute('data-tab')); }}
-function showTab(id) {{ const target = document.getElementById(id); if (!target) return showTab('home'); document.querySelectorAll('.section').forEach(s => s.classList.remove('active')); document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active')); target.classList.add('active'); const nav = document.querySelector(`.nav-item[data-tab="${{id}}"]`); if (nav) nav.classList.add('active'); saveState(id); refreshData(id); }}
+function showTab(id) {{ const target = document.getElementById(id); if (!target) return showTab('home'); document.querySelectorAll('.section').forEach(s => s.classList.remove('active')); document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active')); target.classList.add('active'); const nav = document.querySelector(`.nav-item[data-tab="${{id}}"]`); if (nav) nav.classList.add('active'); saveState(id); refreshData(id); if (MODULE_CONFIG[id]) initModuleTab(id); else closeMarketingPanel(); }}
 async function refreshData(id) {{ if (id === 'wf_queues') {{ const r = await fetch('/api/tasks').then(r => r.json()); if (r.counts) document.getElementById('wf-counts').innerHTML = Object.entries(r.counts).map(([k,v]) => `<div class="stat-box"><div class="label">${{k}}</div><div class="val">${{v}}</div></div>`).join(''); }} if (id === 'kb_clients') refreshClients(); if (id === 'home') refreshHome(); const st = await fetch('/api/status').then(r => r.json()); document.getElementById('ts').innerText = st.generated_at || new Date().toISOString(); }}
 
 async function refreshHome() {{
@@ -445,203 +871,430 @@ async function refreshHome() {{
     document.getElementById('home-recent').innerHTML = recentHtml;
 }}
 
-function getColor(p) {{
-    if (p < 40) return 'color-red';
-    if (p < 70) return 'color-yellow';
-    if (p < 100) return 'color-blue';
-    return 'color-green';
+function initModuleTab(tabId) {{
+    const sel = document.getElementById(tabId + '-client');
+    if (!sel) return;
+    ensureClientsLoaded().then(() => {{
+        const opts = ['<option value="">Выберите клиента</option>'].concat(allClients.map(c => `<option value="${{c.client_id}}">${{c.name}} (${{c.client_id}})</option>`)).join('');
+        sel.innerHTML = opts;
+        const savedClient = localStorage.getItem('ontime_selected_client') || currentClientId;
+        if (savedClient) currentClientId = savedClient;
+        if (currentClientId) {{
+            sel.value = currentClientId;
+            loadModuleData(tabId);
+        }} else {{
+            renderModuleEmpty(tabId, 'Выберите клиента сверху');
+        }}
+    }});
 }}
 
-async function refreshClients() {{
-    const rS = await fetch('/api/clients/summary').then(r => r.json());
-    if (rS.status === 'ok') {{
-        document.getElementById('kpi-prep').innerText = rS.data.prep_avg + '%';
-        document.getElementById('kpi-exec').innerText = rS.data.exec_avg + '%';
+async function loadModuleData(tabId) {{
+    const cid = document.getElementById(tabId + '-client').value;
+    if (!cid) return renderModuleEmpty(tabId, 'Выберите клиента сверху');
+    currentClientId = cid;
+    localStorage.setItem('ontime_selected_client', cid);
+    const cfg = MODULE_CONFIG[tabId];
+    setModuleStatus(tabId, 'Загрузка');
+    try {{
+        const r = await fetch(`/api/module/${{cid}}/${{cfg.module}}/${{cfg.section}}`).then(res => res.json());
+        if (r.status === 'ok') {{
+            renderModuleTable(tabId, r.data);
+            setModuleStatus(tabId, 'Клиент: ' + cid);
+        }} else {{
+            renderModuleEmpty(tabId, r.message || 'Ошибка загрузки');
+            setModuleStatus(tabId, 'Ошибка');
+        }}
+    }} catch (e) {{
+        renderModuleEmpty(tabId, 'Ошибка сети');
+        setModuleStatus(tabId, 'Ошибка');
     }}
-    const rL = await fetch('/api/clients/list').then(r => r.json());
-    if (rL.status === 'ok') {{ allClients = rL.data; renderClients(allClients); }}
 }}
+
+function setModuleStatus(tabId, text) {{
+    const el = document.getElementById(tabId + '-status');
+    if (el) el.innerText = text || '';
+}}
+
+function renderModuleEmpty(tabId, text) {{
+    const cfg = MODULE_CONFIG[tabId];
+    const thead = document.getElementById(tabId + '-thead');
+    const tbody = document.getElementById(tabId + '-tbody');
+    if (!thead || !tbody) return;
+    thead.innerHTML = '<tr>' + cfg.columns.map(c => `<th>${{c}}</th>`).join('') + '<th>Действия</th></tr>';
+    tbody.innerHTML = `<tr><td colspan="${{cfg.columns.length + 1}}" style="color:var(--text-muted); padding:22px 12px;">${{text || 'Нет записей'}} <button class="mkt-btn" style="margin-left:12px" onclick="showModuleAddModal('${{tabId}}')">Добавить запись</button></td></tr>`;
+}}
+
+function renderModuleTable(tabId, items) {{
+    const cfg = MODULE_CONFIG[tabId];
+    const thead = document.getElementById(tabId + '-thead');
+    const tbody = document.getElementById(tabId + '-tbody');
+    const cols = cfg.columns;
+    
+    thead.innerHTML = '<tr>' + cols.map(c => `<th>${{c}}</th>`).join('') + '<th>Действия</th></tr>';
+    
+    const rows = (Array.isArray(items) ? items : (items && Object.keys(items).length ? [items] : [])).filter(Boolean);
+    if (!rows.length) return renderModuleEmpty(tabId, 'Нет записей');
+    tbody.innerHTML = rows.map(item => `
+        <tr>
+            ${{cols.map(c => `<td>${{item[c] || ''}}</td>`).join('')}}
+            <td>
+                <button class="mkt-btn" onclick="showModuleEditModal('${{tabId}}', '${{item.id || 'brand'}}')">Редактировать</button>
+                <button class="mkt-btn" onclick="deleteModuleItem('${{tabId}}', '${{item.id || 'brand'}}')">Удалить</button>
+            </td>
+        </tr>
+    `).join('');
+}}
+
+function showModuleAddModal(tabId) {{
+    const cfg = MODULE_CONFIG[tabId];
+    const cid = document.getElementById(tabId + '-client').value;
+    if (!cid) return alert('Сначала выберите клиента');
+    
+    document.getElementById('mkt-panel-title').innerText = 'Добавить: ' + cfg.title;
+    const host = document.getElementById('mkt-panel-fields');
+    host.innerHTML = cfg.columns.map(c => `<div class="mkt-field"><label>${{c}}</label><input class="premium-input" id="mkt-inp-${{c}}"></div>`).join('') + 
+                     `<button class="nav-item active" style="width:100%; border:none; padding:12px; margin-top:12px" onclick="saveModuleItem('${{tabId}}')">Сохранить</button>`;
+    document.getElementById('mkt-sidepanel').classList.add('open');
+}}
+
+function showModuleEditModal(tabId, itemId) {{
+    const cfg = MODULE_CONFIG[tabId];
+    const cid = document.getElementById(tabId + '-client').value;
+    
+    fetch(`/api/module/${{cid}}/${{cfg.module}}/${{cfg.section}}`)
+        .then(r => r.json())
+        .then(r => {{
+            if (r.status !== 'ok') return;
+            const item = (Array.isArray(r.data) ? r.data : [r.data]).find(i => i.id === itemId);
+            if (!item) return;
+
+            document.getElementById('mkt-panel-title').innerText = 'Редактировать: ' + cfg.title;
+            const host = document.getElementById('mkt-panel-fields');
+            host.innerHTML = cfg.columns.map(c => `<div class="mkt-field"><label>${{c}}</label><input class="premium-input" id="mkt-inp-${{c}}" value="${{item[c] || ''}}"></div>`).join('') + 
+                             `<button class="nav-item active" style="width:100%; border:none; padding:12px; margin-top:12px" onclick="saveModuleItem('${{tabId}}', '${{itemId}}')">Сохранить</button>`;
+            document.getElementById('mkt-sidepanel').classList.add('open');
+        }});
+}}
+
+async function saveModuleItem(tabId, itemId = null) {{
+    const cfg = MODULE_CONFIG[tabId];
+    const cid = document.getElementById(tabId + '-client').value;
+    if (!cid) return alert('Выберите клиента');
+    const body = {{}};
+    if (itemId) body.id = itemId;
+    cfg.columns.forEach(c => {{
+        body[c] = document.getElementById('mkt-inp-' + c).value;
+    }});
+    
+    const action = itemId ? 'update' : 'add';
+    setModuleStatus(tabId, 'Сохранение');
+    const r = await fetch(`/api/module/${{cid}}/${{cfg.module}}/${{cfg.section}}/${{action}}`, {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify(body)
+    }}).then(res => res.json());
+    
+    if (r.status === 'ok') {{
+        closeMarketingPanel();
+        loadModuleData(tabId);
+    }} else {{
+        setModuleStatus(tabId, 'Ошибка сохранения');
+        alert('Ошибка сохранения');
+    }}
+}}
+
+async function deleteModuleItem(tabId, itemId) {{
+    if (!confirm('Удалить запись?')) return;
+    const cfg = MODULE_CONFIG[tabId];
+    const cid = document.getElementById(tabId + '-client').value;
+    if (!cid) return alert('Выберите клиента');
+    const r = await fetch(`/api/module/${{cid}}/${{cfg.module}}/${{cfg.section}}/delete`, {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ id: itemId }})
+    }}).then(res => res.json());
+    if (r.status === 'ok') loadModuleData(tabId);
+}}
+
+function exportModuleCsv(tabId) {{
+    const cid = document.getElementById(tabId + '-client').value;
+    if (!cid) return alert('Выберите клиента');
+    const cfg = MODULE_CONFIG[tabId];
+    window.open(`/api/module-export/${{cid}}/${{cfg.module}}/${{cfg.section}}`, '_blank');
+}}
+
+async function ensureClientsLoaded() {{
+  if (allClients.length) return;
+  try {{
+    const rL = await fetch('/api/clients/list').then(r => r.json());
+    if (rL.status === 'ok') allClients = rL.data || [];
+  }} catch (e) {{}}
+}}
+
+// Global functions for HTML event handlers
+Object.keys(MODULE_CONFIG).forEach(tabId => {{
+    const cfg = MODULE_CONFIG[tabId];
+    const jsName = cfg.title;
+    window['load' + jsName] = () => loadModuleData(tabId);
+    window['show' + jsName + 'AddModal'] = () => showModuleAddModal(tabId);
+    window['export' + jsName + 'Csv'] = () => exportModuleCsv(tabId);
+}});
 function renderClients(list) {{
     const tbody = document.getElementById('clients-table-body');
     tbody.innerHTML = list.map(c => `<tr onclick="openClient('${{c.client_id}}')" style="cursor:pointer">
-        <td><b>${{c.client_id}}</b></td>
+        <td><b>${{c.name}}</b><div style="font-size:11px;color:var(--text-muted)">${{c.client_id}}</div></td>
         <td class="kpi-val ${{getColor(c.prep_percent)}}">${{c.prep_percent}}%</td>
         <td class="kpi-val ${{getColor(c.exec_percent)}}">${{c.exec_percent}}%</td>
         <td style="color:var(--text-muted)">${{c.done_count}} / ${{c.total_count}}</td>
         <td><span class="badge badge-active">${{c.status}}</span></td>
-        <td><button class="nav-item active" style="padding:4px 10px; font-size:10px; border:none" onclick="event.stopPropagation(); openClient('${{c.client_id}}')">ОТКРЫТЬ</button></td>
+        <td style="display:flex; gap:6px; align-items:center">
+          <button class="nav-item active" style="padding:4px 10px; font-size:10px; border:none" onclick="event.stopPropagation(); openClient('${{c.client_id}}')">ОТКРЫТЬ</button>
+          <button class="nav-item" style="padding:4px 10px; font-size:10px; border:none; background:rgba(239,68,68,0.15); color:var(--red)" onclick="event.stopPropagation(); deleteClient('${{c.client_id}}')">УДАЛИТЬ</button>
+        </td>
     </tr>`).join('');
     feather.replace();
 }}
 function filterClients() {{
     const q = document.getElementById('client-search').value.toLowerCase();
-    const filtered = allClients.filter(c => c.client_id.toLowerCase().includes(q));
+    const filtered = allClients.filter(c => c.client_id.toLowerCase().includes(q) || (c.name||'').toLowerCase().includes(q));
     renderClients(filtered);
 }}
 
+function showClientTab(tabName) {{
+    document.querySelectorAll('.client-tab').forEach(el => el.classList.remove('active'));
+    const clickedTab = document.querySelector(`.client-tab[data-tab="${{tabName}}"]`);
+    if (clickedTab) clickedTab.classList.add('active');
+
+    if (tabName === 'general') {{
+        document.getElementById('client-general-tab').style.display = 'block';
+        document.getElementById('client-media-plan-tab').style.display = 'none';
+        document.getElementById('client-chat-tab').style.display = 'none';
+        stopChatPolling();
+    }} else if (tabName === 'media-plan') {{
+        document.getElementById('client-general-tab').style.display = 'none';
+        document.getElementById('client-media-plan-tab').style.display = 'block';
+        document.getElementById('client-chat-tab').style.display = 'none';
+        stopChatPolling();
+        checkActiveMediaPlan();
+    }} else {{
+        document.getElementById('client-general-tab').style.display = 'none';
+        document.getElementById('client-media-plan-tab').style.display = 'none';
+        document.getElementById('client-chat-tab').style.display = 'block';
+        refreshClientChat();
+        startChatPolling();
+    }}
+}}
+
+function stopChatPolling() {{
+    if (chatPollInterval) {{
+        clearInterval(chatPollInterval);
+        chatPollInterval = null;
+    }}
+}}
+
+function startChatPolling() {{
+    stopChatPolling();
+    chatPollInterval = setInterval(() => {{
+        const panelOpen = document.getElementById('client-panel').classList.contains('open');
+        const chatVisible = document.getElementById('client-chat-tab').style.display !== 'none';
+        if (panelOpen && chatVisible) refreshClientChat();
+    }}, 4000);
+}}
+
+async function refreshClientChat() {{
+    if (!currentClientId) return;
+    const r = await fetch(`/api/clients/${{currentClientId}}/chat`).then(res => res.json());
+    if (r.status !== 'ok') return;
+    const messages = (r.data && r.data.messages) || [];
+    const threadEl = document.getElementById('client-chat-thread');
+    threadEl.innerHTML = messages.length
+      ? messages.map(m => {{
+          const klass = m.role === 'human' ? 'chat-msg chat-msg-human' : 'chat-msg chat-msg-minister';
+          const author = m.author || '—';
+          const ts = m.created_at || '';
+          return `<div class="${{klass}}"><div class="chat-meta">${{author}} • ${{ts}}</div><div>${{m.text || ''}}</div></div>`;
+        }}).join('')
+      : '<div class="chat-meta">Сообщений пока нет</div>';
+    threadEl.scrollTop = threadEl.scrollHeight;
+}}
+
+async function sendClientChat() {{
+    if (!currentClientId) return;
+    const input = document.getElementById('client-chat-input');
+    const text = (input.value || '').trim();
+    if (!text) return;
+    const res = await fetch(`/api/clients/${{currentClientId}}/chat`, {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ text }})
+    }}).then(r => r.json());
+    if (res.status === 'ok') {{
+        input.value = '';
+        refreshClientChat();
+    }} else {{
+        alert('Ошибка отправки сообщения');
+    }}
+}}
+
+function resetMediaPlanForm() {{
+    if (pollInterval) {{ clearInterval(pollInterval); pollInterval = null; }}
+    document.getElementById('mp-brief-form').style.display = 'block';
+    document.getElementById('mp-status-view').style.display = 'none';
+    document.getElementById('mp-form-error').style.display = 'none';
+    
+    // Clear inputs
+    document.getElementById('mp-goal').value = '';
+    document.getElementById('mp-product').value = '';
+    document.getElementById('mp-budget').value = '';
+    document.getElementById('mp-period').value = '';
+    document.getElementById('mp-kpi').value = '';
+    
+    showClientTab('general');
+}}
+
+async function checkActiveMediaPlan() {{
+    if (pollInterval) {{ clearInterval(pollInterval); pollInterval = null; }}
+    
+    const r = await fetch(`/api/clients/${{currentClientId}}/media-plan/latest`).then(res => res.json());
+    if (r.status === 'ok' && r.data) {{
+        showMediaPlanStatus(r.data);
+        if (r.data.verdict === 'pending' || r.data.verdict === 'rework') {{
+            startMediaPlanPolling(r.data.run_id);
+        }}
+    }} else {{
+        resetMediaPlanForm();
+    }}
+}}
+
+function showMediaPlanStatus(data) {{
+    document.getElementById('mp-brief-form').style.display = 'none';
+    document.getElementById('mp-status-view').style.display = 'block';
+    
+    document.getElementById('mp-val-run-id').innerText = data.run_id || '—';
+    document.getElementById('mp-val-stage').innerText = data.stage || '—';
+    
+    const verdictEl = document.getElementById('mp-val-verdict');
+    verdictEl.innerText = data.verdict || '—';
+    if (data.verdict === 'approve') {{
+        verdictEl.className = 'color-green';
+    }} else if (data.verdict === 'blocker' || data.verdict === 'escalate') {{
+        verdictEl.className = 'color-red';
+    }} else if (data.verdict === 'rework') {{
+        verdictEl.className = 'color-yellow';
+        verdictEl.innerText = 'rework (1/2)';
+    }} else {{
+        verdictEl.className = 'color-blue';
+    }}
+    
+    document.getElementById('mp-val-updated').innerText = data.updated_at || '—';
+    document.getElementById('mp-val-error').innerText = data.error || 'None';
+    
+    // Render Gates
+    const gatesContainer = document.getElementById('mp-gates-container');
+    const gates = data.gates || [];
+    gatesContainer.innerHTML = gates.map((g, idx) => {{
+        let vClass = 'color-blue';
+        let vText = g.verdict || 'pending';
+        if (g.verdict === 'approve') vClass = 'color-green';
+        else if (g.verdict === 'blocker' || g.verdict === 'escalate') vClass = 'color-red';
+        else if (g.verdict === 'rework') {{
+            vClass = 'color-yellow';
+            vText = 'rework (1/2)';
+        }}
+        return `<div style="display:flex; justify-content:space-between; align-items:center; background:var(--surface-hover); padding:10px; border-radius:var(--radius-sm); border:1px solid var(--border);">
+            <span style="font-size:13px; font-weight:600;">${{g.name}}</span>
+            <span class="${{vClass}}" style="font-size:12px; font-weight:700; text-transform:uppercase;">${{vText}}</span>
+        </div>`;
+    }}).join('');
+    
+    // Render Artifacts
+    const artSection = document.getElementById('mp-artifacts-section');
+    const artsContainer = document.getElementById('mp-artifacts-container');
+    const arts = data.artifacts || {{}};
+    const hasArts = Object.keys(arts).length > 0;
+    
+    if (hasArts) {{
+        artSection.style.display = 'block';
+        artsContainer.innerHTML = Object.entries(arts).map(([name, path]) => {{
+            return `<div style="font-size:12px; display:flex; justify-content:space-between; background:var(--surface-hover); padding:8px 12px; border-radius:var(--radius-sm); border:1px solid var(--border);">
+                <span style="color:var(--text-muted); font-family:monospace;">${{name}}</span>
+                <span style="color:var(--accent); cursor:pointer;" onclick="alert('Путь: ${{path}}')">Посмотреть</span>
+            </div>`;
+        }}).join('');
+    }} else {{
+        artSection.style.display = 'none';
+    }}
+    
+    // Render Sheet URL
+    const sheetSection = document.getElementById('mp-sheet-section');
+    const sheetContainer = document.getElementById('mp-sheet-container');
+    if (data.sheet_url) {{
+        sheetSection.style.display = 'block';
+        sheetContainer.innerHTML = `<a href="${{data.sheet_url}}" target="_blank" style="color:var(--accent); font-weight:700; text-decoration:underline; font-size:13px;">${{data.sheet_url}}</a>`;
+    }} else {{
+        sheetSection.style.display = 'none';
+    }}
+}}
+
+async function runMediaPlan() {{
+    const goal = document.getElementById('mp-goal').value;
+    const product = document.getElementById('mp-product').value;
+    const budget = document.getElementById('mp-budget').value;
+    const period = document.getElementById('mp-period').value;
+    const kpi = document.getElementById('mp-kpi').value;
+    const errEl = document.getElementById('mp-form-error');
+    
+    if (!goal || !product || !budget || !period || !kpi) {{
+        errEl.innerText = 'Заполните все поля брифа!';
+        errEl.style.display = 'block';
+        return;
+    }}
+    errEl.style.display = 'none';
+    
+    const res = await fetch(`/api/clients/${{currentClientId}}/media-plan/run`, {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ goal, product_service: product, budget, period, kpi }})
+    }}).then(r => r.json());
+    
+    if (res.status === 'ok') {{
+        const runId = res.run_id;
+        startMediaPlanPolling(runId);
+    }} else {{
+        alert('Ошибка при запуске: ' + res.message);
+    }}
+}}
+
+function startMediaPlanPolling(runId) {{
+    if (pollInterval) clearInterval(pollInterval);
+    
+    pollMediaPlanStatus(runId);
+    pollInterval = setInterval(() => {{
+        pollMediaPlanStatus(runId);
+    }}, 2000);
+}}
+
+async function pollMediaPlanStatus(runId) {{
+    const r = await fetch(`/api/clients/${{currentClientId}}/media-plan/${{runId}}`).then(res => res.json());
+    if (r.status === 'ok') {{
+        showMediaPlanStatus(r.data);
+        const term = ['approve', 'blocker', 'escalate', 'dead'];
+        if (term.includes(r.data.verdict)) {{
+            clearInterval(pollInterval);
+            pollInterval = null;
+            const rC = await fetch(`/api/clients/${{currentClientId}}`).then(r => r.json());
+            if (rC.status === 'ok') {{
+                document.getElementById('p-done').innerText = rC.data.done_count;
+                document.getElementById('p-total').innerText = rC.data.total_count;
+            }}
+        }}
+    }}
+}}
+
 async function openClient(cid) {{
+    currentClientId = cid;
+    showClientTab('general');
     const r = await fetch(`/api/clients/${{cid}}`).then(r => r.json());
-    if (r.status !== 'ok') return;
-    const c = r.data;
-    document.getElementById('p-name').innerText = c.name;
-    document.getElementById('p-client-id').innerText = 'ID: ' + c.client_id;
-    document.getElementById('p-prep').innerText = c.prep_percent + '%';
-    document.getElementById('p-prep').className = 'val ' + getColor(c.prep_percent);
-    document.getElementById('p-done').innerText = c.done_count;
-    document.getElementById('p-minister').setAttribute('data-client', cid);
-    document.getElementById('client-panel').classList.add('open');
-
-    // tasks
-    fetch(`/api/clients/${{cid}}/tasks`).then(r=>r.json()).then(r => {{
-        const el = document.getElementById('p-tasks');
-        if (!r.data?.length) {{ el.innerText = 'Нет задач'; return; }}
-        const inprog = r.data.filter(t => t.state !== 'done').length;
-        document.getElementById('p-inprogress').innerText = inprog;
-        el.innerHTML = r.data.slice(0,8).map(t =>
-            `<div style="padding:6px 0;border-bottom:1px solid var(--border)">
-              <b>${{t.task_id}}</b>
-              <span style="color:var(--text-muted)"> · ${{t.minister}} · ${{t.task_type}}</span>
-              <span style="float:right;font-size:11px;color:var(--text-muted)">${{t.state}} · ${{t.ts}}</span>
-            </div>`).join('');
-    }});
-
-    // log
-    fetch(`/api/clients/${{cid}}/log`).then(r=>r.json()).then(r => {{
-        const el = document.getElementById('p-log');
-        el.innerHTML = r.data?.length
-            ? r.data.map(l=>`<div style="padding:4px 0;border-bottom:1px solid var(--border);font-size:12px">${{l}}</div>`).join('')
-            : '<span>Нет записей</span>';
-    }});
-
-    // projects
-    fetch(`/api/clients/${{cid}}/projects`).then(r=>r.json()).then(r => {{
-        const el = document.getElementById('p-projects');
-        el.innerHTML = r.data?.length
-            ? r.data.map(p=>`<span style="display:inline-block;margin:3px;padding:3px 10px;background:var(--surface);border-radius:8px;font-size:12px">${{p}}</span>`).join('')
-            : '<span>Нет проектов</span>';
-    }});
-
-    // docs
-    fetch(`/api/clients/${{cid}}/docs`).then(r=>r.json()).then(r => {{
-        const el = document.getElementById('p-doc-list');
-        if (!r.data?.length) {{ el.innerHTML = '<span style="color:var(--text-muted)">Нет документов</span>'; return; }}
-        el.innerHTML = r.data.map((d,i) =>
-            `<div onclick="showDoc(this.getAttribute('data-content'))"
-              data-content="${{d.content.replace(/"/g,'&quot;')}}"
-              style="padding:8px 12px;cursor:pointer;border-radius:8px;font-size:12px;
-              margin-bottom:4px;background:var(--surface);border:1px solid var(--border)">
-              ${{d.name}}
-            </div>`).join('');
-        if (r.data[0]) showDoc(r.data[0].content);
-    }});
-    switchTab('tab-main');
-
-    feather.replace();
-}}
-
-async function submitClientTask() {{
-    const cid = document.getElementById('p-minister').getAttribute('data-client');
-    const minister = document.getElementById('p-minister').value;
-    const text = document.getElementById('p-task-text').value.trim();
-    const res = document.getElementById('p-task-result');
-    if (!minister) {{ res.innerText = 'Выбери министерство'; res.style.color='var(--red)'; return; }}
-    if (!text) {{ res.innerText = 'Напиши задачу'; res.style.color='var(--red)'; return; }}
-    res.innerText = 'Отправляю...'; res.style.color='var(--text-muted)';
-    const r = await fetch('/api/tasks/create', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{client_id: cid, minister, task_type: 'manual', description: text}})
-    }}).then(r=>r.json());
-    if (r.status === 'ok') {{
-        res.innerText = '✓ Задача ' + r.task_id + ' создана';
-        res.style.color = 'var(--green)';
-        document.getElementById('p-task-text').value = '';
-    }} else {{
-        res.innerText = 'Ошибка: ' + (r.message || 'неизвестно');
-        res.style.color = 'var(--red)';
-    }}
-}}
-`).then(r => r.json());
-    if (r.status !== 'ok') return;
-    const c = r.data;
-    document.getElementById('p-name').innerText = c.name;
-    document.getElementById('p-client-id').innerText = 'ID: ' + c.client_id;
-    document.getElementById('p-prep').innerText = c.prep_percent + '%';
-    document.getElementById('p-prep').className = 'val ' + getColor(c.prep_percent);
-    document.getElementById('p-done').innerText = c.done_count;
-    document.getElementById('p-minister').setAttribute('data-client', cid);
-    document.getElementById('client-panel').classList.add('open');
-
-    // tasks
-    fetch(`/api/clients/${{cid}}/tasks`).then(r=>r.json()).then(r => {{
-        const el = document.getElementById('p-tasks');
-        if (!r.data?.length) {{ el.innerText = 'Нет задач'; return; }}
-        const inprog = r.data.filter(t => t.state !== 'done').length;
-        document.getElementById('p-inprogress').innerText = inprog;
-        el.innerHTML = r.data.slice(0,8).map(t =>
-            `<div style="padding:6px 0;border-bottom:1px solid var(--border)">
-              <b>${{t.task_id}}</b>
-              <span style="color:var(--text-muted)"> · ${{t.minister}} · ${{t.task_type}}</span>
-              <span style="float:right;font-size:11px;color:var(--text-muted)">${{t.state}} · ${{t.ts}}</span>
-            </div>`).join('');
-    }});
-
-    // log
-    fetch(`/api/clients/${{cid}}/log`).then(r=>r.json()).then(r => {{
-        const el = document.getElementById('p-log');
-        el.innerHTML = r.data?.length
-            ? r.data.map(l=>`<div style="padding:4px 0;border-bottom:1px solid var(--border);font-size:12px">${{l}}</div>`).join('')
-            : '<span>Нет записей</span>';
-    }});
-
-    // projects
-    fetch(`/api/clients/${{cid}}/projects`).then(r=>r.json()).then(r => {{
-        const el = document.getElementById('p-projects');
-        el.innerHTML = r.data?.length
-            ? r.data.map(p=>`<span style="display:inline-block;margin:3px;padding:3px 10px;background:var(--surface);border-radius:8px;font-size:12px">${{p}}</span>`).join('')
-            : '<span>Нет проектов</span>';
-    }});
-
-    // docs
-    fetch(`/api/clients/${{cid}}/docs`).then(r=>r.json()).then(r => {{
-        const el = document.getElementById('p-doc-list');
-        if (!r.data?.length) {{ el.innerHTML = '<span style="color:var(--text-muted)">Нет документов</span>'; return; }}
-        el.innerHTML = r.data.map((d,i) =>
-            `<div onclick="showDoc(this.getAttribute('data-content'))"
-              data-content="${{d.content.replace(/"/g,'&quot;')}}"
-              style="padding:8px 12px;cursor:pointer;border-radius:8px;font-size:12px;
-              margin-bottom:4px;background:var(--surface);border:1px solid var(--border)">
-              ${{d.name}}
-            </div>`).join('');
-        if (r.data[0]) showDoc(r.data[0].content);
-    }});
-    switchTab('tab-main');
-
-    feather.replace();
-}}
-
-async function submitClientTask() {{
-    const cid = document.getElementById('p-minister').getAttribute('data-client');
-    const minister = document.getElementById('p-minister').value;
-    const text = document.getElementById('p-task-text').value.trim();
-    const res = document.getElementById('p-task-result');
-    if (!minister) {{ res.innerText = 'Выбери министерство'; res.style.color='var(--red)'; return; }}
-    if (!text) {{ res.innerText = 'Напиши задачу'; res.style.color='var(--red)'; return; }}
-    res.innerText = 'Отправляю...'; res.style.color='var(--text-muted)';
-    const r = await fetch('/api/tasks/create', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{client_id: cid, minister, task_type: 'manual', description: text}})
-    }}).then(r=>r.json());
-    if (r.status === 'ok') {{
-        res.innerText = '✓ Задача ' + r.task_id + ' создана';
-        res.style.color = 'var(--green)';
-        document.getElementById('p-task-text').value = '';
-    }} else {{
-        res.innerText = 'Ошибка: ' + (r.message || 'неизвестно');
-        res.style.color = 'var(--red)';
-    }}
-}}`).then(r => r.json());
     if (r.status === 'ok') {{
         const c = r.data;
         document.getElementById('p-name').innerText = c.name;
@@ -653,6 +1306,14 @@ async function submitClientTask() {{
         document.getElementById('p-done').innerText = c.done_count;
         document.getElementById('p-total').innerText = c.total_count;
         
+        const b = c.business || {{}};
+        document.getElementById('p-business-details').innerHTML = `
+            <div style="margin-bottom:8px"><b>Боль:</b> <span style="color:var(--text-muted)">${{b.pain || '—'}}</span></div>
+            <div style="margin-bottom:8px"><b>Оффер:</b> <span style="color:var(--text-muted)">${{b.offer || '—'}}</span></div>
+            <div style="margin-bottom:8px"><b>УТП:</b> <span style="color:var(--text-muted)">${{b.usp || '—'}}</span></div>
+            <div style="margin-bottom:8px"><b>Сегмент:</b> <span style="color:var(--text-muted)">${{b.segment || '—'}}</span></div>
+        `;
+
         let gaps = '';
         if (c.missing_prep.length > 0) {{
             gaps += '<h4>Подготовка:</h4><ul class="gap-list">' + c.missing_prep.map(g => `<li class="gap-item"><i data-feather="x-circle"></i> ${{g}}</li>`).join('') + '</ul>';
@@ -669,143 +1330,340 @@ async function submitClientTask() {{
         feather.replace();
     }}
 }}
-function switchTab(id) {{
-    ['tab-main','tab-docs'].forEach(t => {{
-        document.getElementById(t).style.display = t===id ? 'block' : 'none';
-    }});
-    ['tbtn-main','tbtn-docs'].forEach(b => {{
-        const btn = document.getElementById(b);
-        const active = b === 'tbtn-' + id.replace('tab-','');
-        btn.style.background = active ? 'var(--accent)' : 'transparent';
-        btn.style.color = active ? '#fff' : 'var(--text-muted)';
-    }});
+
+function closeClientPanel() {{
+    if (pollInterval) {{ clearInterval(pollInterval); pollInterval = null; }}
+    stopChatPolling();
+    document.getElementById('client-panel').classList.remove('open');
 }}
 
-function showDoc(content) {{
-    document.getElementById('p-doc-content').innerText = content;
-}}
-
-function closeClientPanel() {{ document.getElementById('client-panel').classList.remove('open'); }}
-window.onload = () => {{ feather.replace(); loadState(); }};
+window.onload = () => {{
+    feather.replace();
+    loadState();
+    setInterval(() => {{
+        const active = document.querySelector('.section.active');
+        if (active && active.id) refreshData(active.id);
+    }}, 15000);
+}};
 </script>
 </body></html>"""
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args): pass
     def _json(self, data, code=200):
         body = json.dumps(data, ensure_ascii=False).encode()
-        self.send_response(code); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+        self.send_response(code); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0"); self.send_header("Pragma", "no-cache"); self.send_header("Expires", "0"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
     def _html(self, html, code=200):
-        body = html.encode(); self.send_response(code); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+        body = html.encode(); self.send_response(code); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0"); self.send_header("Pragma", "no-cache"); self.send_header("Expires", "0"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
     def do_GET(self):
-        url = urlparse(self.path); path = url.path.strip("/")
+        url = urlparse(self.path); path = unquote(url.path).strip("/")
+        aliases = {
+            "agents/marketing/ca": "marketing_ца",
+            "agents/marketing/pains": "marketing_боли",
+            "agents/marketing/usp": "marketing_утп",
+            "agents/marketing/offers": "marketing_офферы",
+            "agents/marketing/funnels": "marketing_воронки",
+            "agents/marketing/traffic": "marketing_источники_трафика",
+            "agents/marketing/ads": "marketing_реклама",
+            "agents/marketing/packaging": "marketing_упаковка_продукта",
+        }
         ministers = get_ministers_from_registry()
         valid = ["", "home", "agents", "login", "kb_docs", "kb_sop", "kb_clients", "kb_vector", "wf_templates", "wf_runs", "wf_queues", "wf_logs", "sys_users", "sys_roles", "sys_integrations", "sys_admin"]
         valid += [f"{s}_{i.replace(' ', '_').lower()}" for s,d in {"sales":["Лиды","Клиенты","Диалоги","Сделки","Заказы","КП","Повторные продажи","Sales Core"],"content":["Контент-завод","Темы","Статьи","Посты","Публикации","Комментарии","Google-таблицы"],"marketing":["ЦА","Боли","УТП","Офферы","Воронки","Источники трафика","Реклама","Упаковка продукта"],"analytics":["Дашборды","Метрики","План-факт","Отчёты","Ошибки данных","Выводы и рекомендации"],"production":["Заказы","План","Смены","Операции","Материалы","Остатки","Брак","Загрузка"],"tech":["Сервер","Скрипты","Боты","API","Интеграции","Воркфлоу","Очереди","Логи","Ошибки"],"mgmt":["Финансы","Юрконтур","Консалтинг","PR","Задачи собственника","Стратегия","Документы"]}.items() for i in d]
-        if path == "" or path in valid: self._html(get_html(ministers))
+        if path in aliases:
+            self._html(get_html(ministers, aliases[path]))
+        elif path == "" or path in valid:
+            init_tab = "home" if path in ("", "agents", "home") else path
+            self._html(get_html(ministers, init_tab))
         elif path == "api/status": self._json({"runtime": "ok", "generated_at": now_ts()})
         elif path == "api/tasks": self._json(get_queue_counts())
         elif path == "api/home": self._json({"status": "ok", "data": get_home_snapshot()})
-        elif path == "api/admin/db":
-            try:
-                dbs = []
-                for p in ["/data/runtime/control.db", "/data/runtime/agents_runtime.sqlite"]:
-                    path_obj = Path(p); dbs.append({"name": path_obj.name, "size": path_obj.stat().st_size if path_obj.exists() else 0, "exists": path_obj.exists()})
-                self._json({"status": "ok", "databases": dbs})
-            except Exception as e: self._json({"status": "error", "error": str(e)})
         elif path == "api/clients/summary": self._json({"status": "ok", "data": get_client_summary()})
         elif path == "api/clients/list": self._json({"status": "ok", "data": get_clients_detailed()})
+        elif path.startswith("api/module/"):
+            parts = path.split("/")  # api/module/{cid}/{module}/{section}
+            if len(parts) == 5:
+                cid, module, section = parts[2], parts[3], parts[4]
+                data = get_module_data(cid, module)
+                self._json({"status": "ok", "data": data.get(section, data if section == "brand" else [])})
+            elif len(parts) == 4:
+                cid, module = parts[2], parts[3]
+                self._json({"status": "ok", "data": get_module_data(cid, module)})
+        elif path.startswith("api/module-export/"):
+            parts = path.split("/")
+            if len(parts) == 5:
+                csv_data = module_export_csv(parts[2], parts[3], parts[4])
+                body = csv_data.encode("utf-8-sig")
+                self.send_response(200); self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition", f"attachment; filename={parts[4]}.csv")
+                self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         elif path.startswith("api/clients/"):
             parts = path.split("/")
+            if len(parts) == 4 and parts[3] == "chat":
+                history = get_chat_history(parts[2])
+                self._json({"status": "ok", "data": {"messages": history}})
+                return
+            if len(parts) == 5 and parts[3] == "media-plan" and parts[4] == "latest":
+                client_id_param = parts[2]
+                latest_run = None
+                latest_mtime = 0
+                
+                for state in ["done", "dead", "processing", "pending"]:
+                    d = QUEUE_ROOT / state
+                    if not d.exists(): continue
+                    for f in d.glob("*.json"):
+                        try:
+                            payload = json.loads(f.read_text(encoding="utf-8"))
+                            if payload.get("client_id") == client_id_param and payload.get("task_type") == "media_plan_v3":
+                                mtime = f.stat().st_mtime
+                                if mtime > latest_mtime:
+                                    latest_mtime = mtime
+                                    latest_run = payload.get("run_id")
+                        except: continue
+                
+                if not latest_run:
+                    registry = _load_json(CLIENT_REGISTRY, {}).get("clients", {})
+                    c_info = registry.get(client_id_param, {})
+                    c_folder = Path(c_info.get("folder", ""))
+                    if not c_folder.exists():
+                        c_folder = CLIENTS_ROOT / client_id_param
+                        if client_id_param.startswith("INT-") or client_id_param in ["pluslogo", "ontime-ai", "ra-vovremya"]:
+                            c_folder = CLIENTS_ROOT / "_INTERNAL" / client_id_param
+                    if c_folder.exists():
+                        p_dir = c_folder / "projects"
+                        if p_dir.exists():
+                            for proj in p_dir.iterdir():
+                                if proj.is_dir() and "RUN-MP-" in proj.name:
+                                    mtime = proj.stat().st_mtime
+                                    if mtime > latest_mtime:
+                                        latest_mtime = mtime
+                                        latest_run = proj.name.split("_")[-1]
+                
+                if latest_run:
+                    parts[4] = latest_run
+                else:
+                    self._json({"status": "ok", "data": None})
+                    return
+
             if len(parts) == 3:
                 details = get_client_details(parts[2])
                 if details: self._json({"status": "ok", "data": details})
                 else: self._json({"status": "error", "message": "not found"}, 404)
-            elif len(parts) == 4 and parts[3] == "tasks":
-                cid = parts[2]
-                tasks = []
-                for state in ["pending", "processing", "done"]:
+            
+            elif len(parts) == 5 and parts[3] == "media-plan" and parts[4] != "run":
+                client_id_param = parts[2]
+                run_id_param = parts[4]
+
+                res_data = {
+                    "stage": "discovery", "verdict": "pending", 
+                    "gates": [
+                        {"name": "Gate-1: Анализ ЦА", "verdict": "pending", "updated_at": ""},
+                        {"name": "Gate-2: Выбор каналов", "verdict": "pending", "updated_at": ""},
+                        {"name": "Gate-3: Бюджет и ROI", "verdict": "pending", "updated_at": ""},
+                        {"name": "Gate-4: Утверждение", "verdict": "pending", "updated_at": ""}
+                    ], 
+                    "artifacts": {}, "sheet_url": None, "error": None, "updated_at": now_ts(), "run_id": run_id_param
+                }
+
+                task_found = False; found_state = None; payload = {}
+                for state in ["done", "dead", "processing", "pending"]:
                     d = QUEUE_ROOT / state
                     if not d.exists(): continue
-                    for f in sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:20]:
+                    for f in d.glob("*" + run_id_param + "*.json"):
                         try:
-                            payload = json.loads(f.read_text(encoding="utf-8"))
-                            if payload.get("client_id") == cid:
-                                tasks.append({"task_id": payload.get("task_id", f.stem),
-                                    "task_type": payload.get("task_type", "—"),
-                                    "minister": payload.get("minister", "—"),
-                                    "state": state,
-                                    "ts": datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")})
+                            tmp = json.loads(f.read_text(encoding="utf-8"))
+                            if tmp.get("client_id") == client_id_param:
+                                payload = tmp; found_state = state; task_found = True; break
                         except: continue
-                self._json({"status": "ok", "data": tasks})
-            elif len(parts) == 4 and parts[3] == "log":
-                cid = parts[2]
-                registry = _load_json(CLIENT_REGISTRY, {}).get("clients", {})
-                cdata = registry.get(cid, {})
-                folder = Path(cdata.get("folder", ""))
-                log_path = folder / "log.md"
-                lines = []
-                if log_path.exists():
-                    raw = log_path.read_text(encoding="utf-8")
-                    lines = [l for l in raw.splitlines() if l.startswith("## ")][:5]
-                self._json({"status": "ok", "data": lines})
-            elif len(parts) == 4 and parts[3] == "projects":
-                cid = parts[2]
-                registry = _load_json(CLIENT_REGISTRY, {}).get("clients", {})
-                cdata = registry.get(cid, {})
-                folder = Path(cdata.get("folder", ""))
-                proj_dir = folder / "projects"
-                projects = []
-                if proj_dir.exists():
-                    projects = [d.name for d in proj_dir.iterdir() if d.is_dir()]
-                self._json({"status": "ok", "data": projects})
-            elif len(parts) == 4 and parts[3] == "docs":
-                cid = parts[2]
-                registry = _load_json(CLIENT_REGISTRY, {}).get("clients", {})
-                cdata = registry.get(cid, {})
-                folder = Path(cdata.get("folder", ""))
-                docs = []
-                for rel in ["client.md", "index.md", "_DASHBOARD.md"]:
-                    p = folder / rel
-                    if p.exists():
-                        docs.append({"name": rel, "path": rel, "content": p.read_text(encoding="utf-8")[:3000]})
-                for sub in ["knowledge", "inbox"]:
-                    d = folder / sub
-                    if d.exists():
-                        for f in sorted(d.glob("*.md"))[:10]:
-                            docs.append({"name": f"{sub}/{f.name}", "path": f"{sub}/{f.name}",
-                                "content": f.read_text(encoding="utf-8")[:3000]})
-                self._json({"status": "ok", "data": docs})
-            else: self._json({"error": "not found"}, 404)
+                    if task_found: break
+
+                if task_found:
+                    res_data["updated_at"] = datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc).isoformat()
+                    if found_state == "done":
+                        res_data.update({"stage": "approval", "verdict": "approve"})
+                        for g in res_data["gates"]: g.update({"verdict": "approve", "updated_at": res_data["updated_at"]})
+                    elif found_state == "dead":
+                        res_data.update({"stage": "approval", "verdict": "blocker", "error": "Task failed"})
+                        for g in res_data["gates"]: g.update({"verdict": "blocker", "updated_at": res_data["updated_at"]})
+                    else:
+                        # Simulation
+                        try:
+                            c_dt = datetime.strptime(payload.get("created_at", "").replace(" UTC", ""), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                            elap = (datetime.now(timezone.utc) - c_dt).total_seconds()
+                            if elap > 5: res_data["gates"][0]["verdict"] = "approve"
+                            if elap > 10: res_data["gates"][1]["verdict"] = "approve"
+                        except: pass
+
+                # Linkage
+                proj_p = find_project_by_run_id(client_id_param, run_id_param)
+                if proj_p:
+                    for art in ["brief.md", "strategy.md", "media_plan.md", "content_calendar.csv"]:
+                        if (proj_p / art).exists(): res_data["artifacts"][art] = str(proj_p / art)
+                    st_p = proj_p / "STATUS.md"
+                    if st_p.exists():
+                        txt = st_p.read_text(encoding="utf-8")
+                        import re
+                        m = re.search(r"sheet_url:\s*(https://\S+)", txt)
+                        if m: res_data["sheet_url"] = m.group(1)
+                        if "verdict: approve" in txt: res_data["verdict"] = "approve"
+
+                self._json({"status": "ok", "data": res_data})
+                
+            elif len(parts) == 6 and parts[3] == "media-plan" and parts[4] == "artifacts":
+                            # GET /api/clients/{client_id}/media-plan/artifacts/{run_id}
+                            cid = parts[2]; rid = parts[5]
+                            arts = {}
+                            proj_p = find_project_by_run_id(cid, rid)
+                            if proj_p:
+                                for art in ["brief.md", "strategy.md", "media_plan.md", "content_calendar.csv"]:
+                                    if (proj_p / art).exists(): arts[art] = str(proj_p / art)
+                            self._json({"status": "ok", "data": arts})
+            else:
+                self._json({"error": "not found"}, 404)
+        else:
+            self._json({"error": "not found"}, 404)
 
     def do_POST(self):
-        url = urlparse(self.path); path = url.path.strip("/")
+        url = urlparse(self.path); path = unquote(url.path).strip("/")
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
 
-        if path == "api/tasks/create":
-            client_id = body.get("client_id", "")
-            minister = body.get("minister", "")
-            task_type = body.get("task_type", "manual")
-            description = body.get("description", "")
-            if not client_id or not minister or not description:
-                self._json({"status": "error", "message": "client_id, minister, description required"}, 400)
+        if path.startswith("api/clients/") and path.endswith("/chat"):
+            cid = path.split("/")[2]
+            text = str(body.get("text", "")).strip()
+            if not text:
+                self._json({"status": "error", "message": "message text required"}, 400)
                 return
-            import uuid
-            task_id = f"TASK-{uuid.uuid4().hex[:8].upper()}"
+            ts = _now_iso()
+            history = get_chat_history(cid)
+            prior_user_count = sum(1 for m in history if m.get("role") == "user")
+            history.append({"role": "user", "content": text, "ts": ts})
+            bot_reply = generate_brief_response(prior_user_count)
+            history.append({"role": "assistant", "content": bot_reply, "ts": _now_iso()})
+            save_chat(cid, history)
+            self._json({"status": "ok", "data": {"messages": history}})
+        elif path.startswith("api/clients/") and path.endswith("/media-plan/run"):
+            cid = path.split("/")[2]
+            goal = body.get("goal")
+            product = body.get("product_service")
+            budget = body.get("budget")
+            period = body.get("period")
+            kpi = body.get("kpi")
+            
+            if not all([goal, product, budget, period, kpi]):
+                self._json({"status": "error", "message": "all brief fields required"}, 400)
+                return
+            
+            run_id = f"RUN-MP-{uuid.uuid4().hex[:6].upper()}"
+            task_id = f"TASK-{run_id}"
+            
             payload = {
                 "task_id": task_id,
-                "client_id": client_id,
-                "minister": minister,
-                "task_type": task_type,
-                "description": description,
-                "created_at": now_ts(),
-                "source": "dashboard"
+                "run_id": run_id,
+                "client_id": cid,
+                "project_id": f"MP-{period}",
+                "task_type": "media_plan_v3",
+                "sop_id": "SOP-MEDIA-PLAN-V3-001",
+                "goal_metric": kpi,
+                "brief": body,
+                "created_at": now_ts()
             }
-            pending_dir = QUEUE_ROOT / "pending"
-            pending_dir.mkdir(parents=True, exist_ok=True)
-            (pending_dir / f"{task_id}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            self._json({"status": "ok", "task_id": task_id})
+            
+            p_dir = QUEUE_ROOT / "pending"
+            p_dir.mkdir(parents=True, exist_ok=True)
+            (p_dir / f"{task_id}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            
+            self._json({"status": "ok", "run_id": run_id})
+        elif path.startswith("api/module/"):
+            parts = path.split("/")  # api/module/{cid}/{module}/{section}/action
+            if len(parts) == 6:
+                cid, module, section, action = parts[2], parts[3], parts[4], parts[5]
+                if action == "add":
+                    item = module_add_item(cid, module, section, body)
+                    self._json({"status": "ok", "data": item})
+                elif action == "update":
+                    ok = module_update_item(cid, module, section, body.get("id"), body)
+                    self._json({"status": "ok"} if ok else {"status": "error", "message": "not found"})
+                elif action == "delete":
+                    ok = module_delete_item(cid, module, section, body.get("id"))
+                    self._json({"status": "ok"} if ok else {"status": "error", "message": "not found"})
+        elif path == "api/marketing/export-sheet" or path.endswith("api/marketing/export-sheet"):
+            client_id = str(body.get("client_id", "")).strip()
+            tab_id = str(body.get("tab_id", "")).strip()
+            project_id = str(body.get("project_id", "all")).strip() or "all"
+            columns = body.get("columns") or []
+            rows = body.get("rows") or []
+            if not client_id or not tab_id:
+                self._json({"status": "error", "message": "client_id and tab_id required"}, 400)
+                return
+            if not isinstance(columns, list) or not isinstance(rows, list):
+                self._json({"status": "error", "message": "columns/rows must be arrays"}, 400)
+                return
+
+            c_folder = get_client_folder(client_id)
+            if not c_folder:
+                self._json({"status": "error", "message": f"client folder not found: {client_id}"}, 404)
+                return
+
+            export_dir = c_folder / "marketing" / "exports"
+            export_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base = f"{tab_id}_{project_id}_{ts}"
+            json_path = export_dir / f"{base}.json"
+            csv_path = export_dir / f"{base}.csv"
+
+            json_path.write_text(json.dumps({
+                "client_id": client_id,
+                "project_id": project_id,
+                "tab_id": tab_id,
+                "columns": columns,
+                "rows": rows,
+                "exported_at": now_ts(),
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            def _csv_escape(v):
+                s = str(v if v is not None else "")
+                return '"' + s.replace('"', '""') + '"'
+            csv_lines = []
+            if columns:
+                csv_lines.append(",".join(_csv_escape(c) for c in columns))
+                for row in rows:
+                    if isinstance(row, dict):
+                        csv_lines.append(",".join(_csv_escape(row.get(c, "")) for c in columns))
+            csv_path.write_text("\n".join(csv_lines) + ("\n" if csv_lines else ""), encoding="utf-8")
+
+            log_path = c_folder / "marketing" / "log.md"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as fh:
+                fh.write(f"- {now_ts()} export_sheet tab={tab_id} project={project_id} json={json_path.name} csv={csv_path.name}\n")
+
+            sheet_url = None
+            p_dir = c_folder / "projects"
+            if p_dir.exists():
+                latest_status = None
+                latest_mtime = 0
+                for p in p_dir.iterdir():
+                    st = p / "STATUS.md"
+                    if st.exists():
+                        m = st.stat().st_mtime
+                        if m > latest_mtime:
+                            latest_mtime = m
+                            latest_status = st
+                if latest_status:
+                    txt = latest_status.read_text(encoding="utf-8")
+                    m = re.search(r"sheet_url:\s*(https://\S+)", txt)
+                    if m:
+                        sheet_url = m.group(1)
+
+            self._json({
+                "status": "ok",
+                "client_id": client_id,
+                "tab_id": tab_id,
+                "export_path": str(csv_path),
+                "json_path": str(json_path),
+                "sheet_url": sheet_url
+            })
         else:
             self._json({"error": "not found"}, 404)
 
