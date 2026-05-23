@@ -326,7 +326,7 @@ h2 {{ font-size: 28px; font-weight: 800; margin-bottom: 32px; }}
 .premium-table td {{ padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }}
 .kpi-val {{ font-weight: 800; }}
 .color-red {{ color: var(--red); }} .color-yellow {{ color: var(--yellow); }} .color-blue {{ color: var(--blue); }} .color-green {{ color: var(--green); }}
-#client-panel {{ position: fixed; top: 0; right: 0; width: 480px; height: 100vh; background: var(--sidebar); border-left: 1px solid var(--border); z-index: 2000; transform: translateX(100%); transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1); padding: 32px; overflow-y: auto; }}
+#client-panel {{ position: fixed; top: 0; right: 0; width: 720px; height: 100vh; background: var(--sidebar); border-left: 1px solid var(--border); z-index: 2000; transform: translateX(100%); transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1); padding: 32px; overflow-y: auto; }}
 #client-panel.open {{ transform: translateX(0); }}
 .panel-close {{ position: absolute; top: 20px; right: 20px; cursor: pointer; color: var(--text-muted); }}
 .gap-list {{ list-style: none; margin-top: 12px; }}
@@ -387,18 +387,52 @@ h2 {{ font-size: 28px; font-weight: 800; margin-bottom: 32px; }}
     <div class="panel-close" onclick="closeClientPanel()"><i data-feather="x"></i></div>
     <div id="panel-content">
       <h2 id="p-name">Client</h2>
-      <div style="color:var(--text-muted); font-size:13px; margin-bottom:32px" id="p-client-id"></div>
-      <div class="stats-grid">
-        <div class="stat-box"><div class="label">Подготовка %</div><div id="p-prep" class="val"></div></div>
-        <div class="stat-box"><div class="label">Реализация %</div><div id="p-exec" class="val"></div></div>
+      <div style="color:var(--text-muted);font-size:13px;margin-bottom:16px" id="p-client-id"></div>
+      <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:24px">
+        <div class="stat-box"><div class="label">В работе</div><div id="p-inprogress" class="val">0</div></div>
+        <div class="stat-box"><div class="label">Выполнено</div><div id="p-done" class="val">0</div></div>
+        <div class="stat-box"><div class="label">Подготовка</div><div id="p-prep" class="val"></div></div>
       </div>
-      <div class="card premium-glow">
-        <h3>Чего не хватает до 100%</h3>
-        <div id="p-gaps"></div>
+
+      <div class="card" style="margin-bottom:16px">
+        <h3 style="margin-bottom:12px">Текущие задачи</h3>
+        <div id="p-tasks" style="font-size:13px;color:var(--text-muted)">Загрузка...</div>
       </div>
-      <div class="card"><h3>Статистика задач</h3>
-        <p style="font-size:14px">Всего: <b id="p-total">0</b></p>
-        <p style="font-size:14px">Завершено: <b id="p-done">0</b></p>
+
+      <div class="card" style="margin-bottom:16px">
+        <h3 style="margin-bottom:12px">Активность</h3>
+        <div id="p-log" style="font-size:13px;color:var(--text-muted)">Загрузка...</div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
+        <h3 style="margin-bottom:12px">Проекты</h3>
+        <div id="p-projects" style="font-size:13px;color:var(--text-muted)">Загрузка...</div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-bottom:16px">Поставить задачу</h3>
+        <select id="p-minister" class="premium-input" style="width:100%;margin-bottom:12px">
+          <option value="">— Выбери министерство —</option>
+          <option value="MIN_SMM">MIN_SMM — СММ</option>
+          <option value="MIN_SALES">MIN_SALES — Продажи</option>
+          <option value="MIN_CREATIVE">MIN_CREATIVE — Маркетинг</option>
+          <option value="MIN_ANALYTICS">MIN_ANALYTICS — Аналитика</option>
+          <option value="MIN_FINANCE">MIN_FINANCE — Финансы</option>
+          <option value="MIN_PR">MIN_PR — PR</option>
+          <option value="MIN_LEGAL">MIN_LEGAL — Юридический</option>
+          <option value="MIN_CONSULTING">MIN_CONSULTING — Консалтинг</option>
+          <option value="MIN_DESIGN">MIN_DESIGN — Дизайн</option>
+          <option value="MIN_PRODUCTION">MIN_PRODUCTION — Конструктор</option>
+          <option value="MIN_ZAVOD">MIN_ZAVOD — Производство</option>
+          <option value="MIN_TECH">MIN_TECH — Техника</option>
+        </select>
+        <textarea id="p-task-text" class="premium-input"
+          style="width:100%;height:80px;resize:vertical;margin-bottom:12px"
+          placeholder="Опиши задачу..."></textarea>
+        <button class="nav-item active"
+          style="width:100%;padding:10px;border:none;cursor:pointer"
+          onclick="submitClientTask()">Отправить в работу</button>
+        <div id="p-task-result" style="margin-top:8px;font-size:12px"></div>
       </div>
     </div>
   </div>
@@ -472,31 +506,69 @@ function filterClients() {{
 }}
 async function openClient(cid) {{
     const r = await fetch(`/api/clients/${{cid}}`).then(r => r.json());
+    if (r.status !== 'ok') return;
+    const c = r.data;
+    document.getElementById('p-name').innerText = c.name;
+    document.getElementById('p-client-id').innerText = 'ID: ' + c.client_id;
+    document.getElementById('p-prep').innerText = c.prep_percent + '%';
+    document.getElementById('p-prep').className = 'val ' + getColor(c.prep_percent);
+    document.getElementById('p-done').innerText = c.done_count;
+    document.getElementById('p-minister').setAttribute('data-client', cid);
+    document.getElementById('client-panel').classList.add('open');
+
+    // tasks
+    fetch(`/api/clients/${{cid}}/tasks`).then(r=>r.json()).then(r => {{
+        const el = document.getElementById('p-tasks');
+        if (!r.data?.length) {{ el.innerText = 'Нет задач'; return; }}
+        const inprog = r.data.filter(t => t.state !== 'done').length;
+        document.getElementById('p-inprogress').innerText = inprog;
+        el.innerHTML = r.data.slice(0,8).map(t =>
+            `<div style="padding:6px 0;border-bottom:1px solid var(--border)">
+              <b>${{t.task_id}}</b>
+              <span style="color:var(--text-muted)"> · ${{t.minister}} · ${{t.task_type}}</span>
+              <span style="float:right;font-size:11px;color:var(--text-muted)">${{t.state}} · ${{t.ts}}</span>
+            </div>`).join('');
+    }});
+
+    // log
+    fetch(`/api/clients/${{cid}}/log`).then(r=>r.json()).then(r => {{
+        const el = document.getElementById('p-log');
+        el.innerHTML = r.data?.length
+            ? r.data.map(l=>`<div style="padding:4px 0;border-bottom:1px solid var(--border);font-size:12px">${{l}}</div>`).join('')
+            : '<span>Нет записей</span>';
+    }});
+
+    // projects
+    fetch(`/api/clients/${{cid}}/projects`).then(r=>r.json()).then(r => {{
+        const el = document.getElementById('p-projects');
+        el.innerHTML = r.data?.length
+            ? r.data.map(p=>`<span style="display:inline-block;margin:3px;padding:3px 10px;background:var(--surface);border-radius:8px;font-size:12px">${{p}}</span>`).join('')
+            : '<span>Нет проектов</span>';
+    }});
+
+    feather.replace();
+}}
+
+async function submitClientTask() {{
+    const cid = document.getElementById('p-minister').getAttribute('data-client');
+    const minister = document.getElementById('p-minister').value;
+    const text = document.getElementById('p-task-text').value.trim();
+    const res = document.getElementById('p-task-result');
+    if (!minister) {{ res.innerText = 'Выбери министерство'; res.style.color='var(--red)'; return; }}
+    if (!text) {{ res.innerText = 'Напиши задачу'; res.style.color='var(--red)'; return; }}
+    res.innerText = 'Отправляю...'; res.style.color='var(--text-muted)';
+    const r = await fetch('/api/tasks/create', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{client_id: cid, minister, task_type: 'manual', description: text}})
+    }}).then(r=>r.json());
     if (r.status === 'ok') {{
-        const c = r.data;
-        document.getElementById('p-name').innerText = c.name;
-        document.getElementById('p-client-id').innerText = 'ID: ' + c.client_id;
-        document.getElementById('p-prep').innerText = c.prep_percent + '%';
-        document.getElementById('p-prep').className = 'val ' + getColor(c.prep_percent);
-        document.getElementById('p-exec').innerText = c.exec_percent + '%';
-        document.getElementById('p-exec').className = 'val ' + getColor(c.exec_percent);
-        document.getElementById('p-done').innerText = c.done_count;
-        document.getElementById('p-total').innerText = c.total_count;
-        
-        let gaps = '';
-        if (c.missing_prep.length > 0) {{
-            gaps += '<h4>Подготовка:</h4><ul class="gap-list">' + c.missing_prep.map(g => `<li class="gap-item"><i data-feather="x-circle"></i> ${{g}}</li>`).join('') + '</ul>';
-        }}
-        if (c.total_count === 0) {{
-            gaps += '<h4 style="margin-top:16px">Реализация:</h4><ul class="gap-list"><li class="gap-item"><i data-feather="x-circle"></i> Нет ни одной задачи в очереди</li></ul>';
-        }} else if (c.done_count < c.total_count) {{
-            gaps += '<h4 style="margin-top:16px">Реализация:</h4><ul class="gap-list"><li class="gap-item"><i data-feather="x-circle"></i> ${{c.total_count - c.done_count}} задач не завершены</li></ul>';
-        }}
-        if (gaps === '') gaps = '<p style="color:var(--green)">✅ 100% Готовность</p>';
-        document.getElementById('p-gaps').innerHTML = gaps;
-        
-        document.getElementById('client-panel').classList.add('open');
-        feather.replace();
+        res.innerText = '✓ Задача ' + r.task_id + ' создана';
+        res.style.color = 'var(--green)';
+        document.getElementById('p-task-text').value = '';
+    }} else {{
+        res.innerText = 'Ошибка: ' + (r.message || 'неизвестно');
+        res.style.color = 'var(--red)';
     }}
 }}
 function closeClientPanel() {{ document.getElementById('client-panel').classList.remove('open'); }}
@@ -535,7 +607,76 @@ class Handler(BaseHTTPRequestHandler):
                 details = get_client_details(parts[2])
                 if details: self._json({"status": "ok", "data": details})
                 else: self._json({"status": "error", "message": "not found"}, 404)
+            elif len(parts) == 4 and parts[3] == "tasks":
+                cid = parts[2]
+                tasks = []
+                for state in ["pending", "processing", "done"]:
+                    d = QUEUE_ROOT / state
+                    if not d.exists(): continue
+                    for f in sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:20]:
+                        try:
+                            payload = json.loads(f.read_text(encoding="utf-8"))
+                            if payload.get("client_id") == cid:
+                                tasks.append({"task_id": payload.get("task_id", f.stem),
+                                    "task_type": payload.get("task_type", "—"),
+                                    "minister": payload.get("minister", "—"),
+                                    "state": state,
+                                    "ts": datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")})
+                        except: continue
+                self._json({"status": "ok", "data": tasks})
+            elif len(parts) == 4 and parts[3] == "log":
+                cid = parts[2]
+                registry = _load_json(CLIENT_REGISTRY, {}).get("clients", {})
+                cdata = registry.get(cid, {})
+                folder = Path(cdata.get("folder", ""))
+                log_path = folder / "log.md"
+                lines = []
+                if log_path.exists():
+                    raw = log_path.read_text(encoding="utf-8")
+                    lines = [l for l in raw.splitlines() if l.startswith("## ")][:5]
+                self._json({"status": "ok", "data": lines})
+            elif len(parts) == 4 and parts[3] == "projects":
+                cid = parts[2]
+                registry = _load_json(CLIENT_REGISTRY, {}).get("clients", {})
+                cdata = registry.get(cid, {})
+                folder = Path(cdata.get("folder", ""))
+                proj_dir = folder / "projects"
+                projects = []
+                if proj_dir.exists():
+                    projects = [d.name for d in proj_dir.iterdir() if d.is_dir()]
+                self._json({"status": "ok", "data": projects})
+            else: self._json({"status": "error", "message": "not found"}, 404)
         else: self._json({"error": "not found"}, 404)
+
+    def do_POST(self):
+        url = urlparse(self.path); path = url.path.strip("/")
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+
+        if path == "api/tasks/create":
+            client_id = body.get("client_id", "")
+            minister = body.get("minister", "")
+            task_type = body.get("task_type", "manual")
+            description = body.get("description", "")
+            if not client_id or not minister or not description:
+                self._json({"status": "error", "message": "client_id, minister, description required"}, 400)
+                return
+            task_id = f"TASK-{uuid.uuid4().hex[:8].upper()}"
+            payload = {
+                "task_id": task_id,
+                "client_id": client_id,
+                "minister": minister,
+                "task_type": task_type,
+                "description": description,
+                "created_at": now_ts(),
+                "source": "dashboard"
+            }
+            pending_dir = QUEUE_ROOT / "pending"
+            pending_dir.mkdir(parents=True, exist_ok=True)
+            (pending_dir / f"{task_id}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._json({"status": "ok", "task_id": task_id})
+        else:
+            self._json({"error": "not found"}, 404)
 
 if __name__ == "__main__":
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
