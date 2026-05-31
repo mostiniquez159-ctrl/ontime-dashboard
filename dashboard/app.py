@@ -137,7 +137,7 @@ def append_stage_chat_message(client_id, stage, run_id, author, text):
     _save_json(CHAT_STORE, store)
 
 def get_queue_counts():
-    counts = {"pending": 0, "processing": 0, "done": 0, "dead": 0}
+    counts = {"pending": 0, "high": 0, "processing": 0, "done": 0, "dead": 0}
     if QUEUE_ROOT.exists():
         for d in QUEUE_ROOT.iterdir():
             if d.is_dir() and d.name in counts:
@@ -695,7 +695,8 @@ def get_home_snapshot():
     missing_clients = sum(1 for c in clients if c.get("status") == "missing")
     unregistered_clients = sum(1 for c in clients if c.get("status") == "unregistered")
     risks = q.get("dead", 0) + missing_clients
-    notifications = q.get("pending", 0) + unregistered_clients
+    # Notifications should reflect actionable runtime alerts, not registry hygiene noise.
+    notifications = q.get("dead", 0) + q.get("high", 0)
 
     recent_actions = []
     done_dir = QUEUE_ROOT / "done"
@@ -3465,24 +3466,24 @@ h2 {{ font-size: 28px; font-weight: 800; margin-bottom: 32px; }}
           <ul class="recent-list" id="home-recent"></ul>
         </div>
         <div class="card home-wide">
-          <h3 style="margin-bottom:12px">Server Recovery Coverage</h3>
+          <h3 style="margin-bottom:12px">Покрытие восстановления сервера</h3>
           <div style="display:grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap:12px; margin-bottom:12px;">
-            <div class="stat-box"><div class="label">Docs Sync</div><div class="val" id="dr-docs-sync">UNKNOWN</div></div>
-            <div class="stat-box"><div class="label">DR-full Backup</div><div class="val" id="dr-backup-pass">UNKNOWN</div></div>
-            <div class="stat-box"><div class="label">Off-host Copy</div><div class="val" id="dr-off-host">UNKNOWN</div></div>
-            <div class="stat-box"><div class="label">Restore Smoke</div><div class="val" id="dr-restore-smoke">UNKNOWN</div></div>
-            <div class="stat-box"><div class="label">Server Recovery PASS</div><div class="val" id="dr-server-pass">UNKNOWN</div></div>
-            <div class="stat-box"><div class="label">Missing Zones</div><div class="val" id="dr-missing-zones">—</div></div>
+            <div class="stat-box"><div class="label">Синхронизация документов</div><div class="val" id="dr-docs-sync">НЕИЗВЕСТНО</div></div>
+            <div class="stat-box"><div class="label">DR-бэкап (полный)</div><div class="val" id="dr-backup-pass">НЕИЗВЕСТНО</div></div>
+            <div class="stat-box"><div class="label">Копия вне сервера</div><div class="val" id="dr-off-host">НЕИЗВЕСТНО</div></div>
+            <div class="stat-box"><div class="label">Тест восстановления</div><div class="val" id="dr-restore-smoke">НЕИЗВЕСТНО</div></div>
+            <div class="stat-box"><div class="label">Восстановление сервера</div><div class="val" id="dr-server-pass">НЕИЗВЕСТНО</div></div>
+            <div class="stat-box"><div class="label">Отсутствующие зоны</div><div class="val" id="dr-missing-zones">—</div></div>
           </div>
         </div>
         <div class="card home-wide">
-          <h3 style="margin-bottom:12px">Backup Storage Budget</h3>
+          <h3 style="margin-bottom:12px">Бюджет хранилища бэкапов</h3>
           <div style="display:grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap:12px; margin-bottom:12px;">
-            <div class="stat-box"><div class="label">Local Backup GB</div><div class="val" id="dr-local-gb">—</div></div>
-            <div class="stat-box"><div class="label">Cloud Backup GB</div><div class="val" id="dr-cloud-gb">UNKNOWN</div></div>
+            <div class="stat-box"><div class="label">Локальный бэкап (ГБ)</div><div class="val" id="dr-local-gb">—</div></div>
+            <div class="stat-box"><div class="label">Облачный бэкап (ГБ)</div><div class="val" id="dr-cloud-gb">НЕИЗВЕСТНО</div></div>
             <div class="stat-box"><div class="label">Stage GB</div><div class="val" id="dr-stage-gb">—</div></div>
-            <div class="stat-box"><div class="label">Status</div><div class="val" id="dr-storage-status">UNKNOWN</div></div>
-            <div class="stat-box"><div class="label">Cleanup Candidates</div><div class="val" id="dr-cleanup-cnt">0</div></div>
+            <div class="stat-box"><div class="label">Статус</div><div class="val" id="dr-storage-status">НЕИЗВЕСТНО</div></div>
+            <div class="stat-box"><div class="label">Кандидаты на очистку</div><div class="val" id="dr-cleanup-cnt">0</div></div>
           </div>
         </div>
       </div>
@@ -3977,16 +3978,12 @@ function showTab(id) {{
     if (id === "analytics_ошибки_данных") {{ ensureClientsLoaded().then(() => {{ populateAnalyticsClients(id); loadAnalyticsDataErrors(); }}); }}
     if (id === "analytics_выводы_и_рекомендации") {{ ensureClientsLoaded().then(() => {{ populateAnalyticsClients(id); loadAnalyticsInsights(); }}); }}
     if (id === 'smm_smm') initSmmSection();
-    if (id === 'smm_web-завод') initWebFactory();
+    if (id === 'smm_web-\u0437\u0430\u0432\u043e\u0434') initWebFactory('smm_web-\u0437\u0430\u0432\u043e\u0434');
+    if (id === 'content_web-\u0437\u0430\u0432\u043e\u0434') initWebFactory('content_web-\u0437\u0430\u0432\u043e\u0434');
     if (id === 'content_\u043a\u043e\u043d\u0442\u0435\u043d\u0442-\u0437\u0430\u0432\u043e\u0434') {{ ensureClientsLoaded().then(() => {{
-        const sel = document.getElementById('cf-client-sel');
-        if (sel && sel.options.length <= 1) {{
-            sel.innerHTML = '<option value="">\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043a\u043b\u0438\u0435\u043d\u0442\u0430</option>' +
-                allClients.map(c => `<option value="${{c.client_id}}">${{c.name}} (${{c.client_id}})</option>`).join('');
-            const saved = localStorage.getItem('ontime_selected_client') || currentClientId;
-            if (saved && Array.from(sel.options).some(o => o.value === saved)) {{ sel.value = saved; }}
-        }}
-        initContentFactory();
+        renderCfClientsList();
+        const saved = localStorage.getItem('ontime_selected_client') || currentClientId;
+        if (saved) {{ const cl = allClients.find(c => c.client_id === saved); if (cl) selectCfClient(cl.client_id, cl.name); }}
     }}); }}
 }}
 async function refreshData(id) {{
@@ -5030,7 +5027,7 @@ async function refreshHome() {{
 
     const sr = d.server_recovery || {{}};
     const bs = d.backup_storage || {{}};
-    const tf = (v) => v === true ? 'PASS' : (v === false ? 'FAIL' : 'UNKNOWN');
+    const tf = (v) => v === true ? 'ПРОЙДЕНО' : (v === false ? 'ПРОВАЛ' : 'НЕИЗВЕСТНО');
     document.getElementById('dr-docs-sync').innerText = tf(sr.docs_sync_pass);
     document.getElementById('dr-backup-pass').innerText = tf(sr.dr_backup_pass);
     document.getElementById('dr-off-host').innerText = tf(sr.off_host_copy_pass);
@@ -5040,9 +5037,11 @@ async function refreshHome() {{
     document.getElementById('dr-missing-zones').innerText = mz.length ? mz.join(', ') : '[]';
 
     document.getElementById('dr-local-gb').innerText = bs.local_backup_gb ?? '—';
-    document.getElementById('dr-cloud-gb').innerText = (bs.cloud_backup_gb === null || bs.cloud_backup_gb === undefined) ? 'UNKNOWN' : bs.cloud_backup_gb;
+    document.getElementById('dr-cloud-gb').innerText = (bs.cloud_backup_gb === null || bs.cloud_backup_gb === undefined) ? 'НЕИЗВЕСТНО' : bs.cloud_backup_gb;
     document.getElementById('dr-stage-gb').innerText = bs.stage_gb ?? '—';
-    document.getElementById('dr-storage-status').innerText = bs.status || 'UNKNOWN';
+    const statusMap = {{'PASS':'ПРОЙДЕНО','FAIL':'ПРОВАЛ','UNKNOWN':'НЕИЗВЕСТНО','WARN':'ПРЕДУПРЕЖДЕНИЕ','DEGRADED':'ДЕГРАДАЦИЯ','RED':'КРИТИЧНО','GREEN':'НОРМА'}};
+    const st = String(bs.status || 'UNKNOWN').toUpperCase();
+    document.getElementById('dr-storage-status').innerText = statusMap[st] || bs.status || 'НЕИЗВЕСТНО';
     const cc = Array.isArray(bs.cleanup_candidates) ? bs.cleanup_candidates.length : 0;
     document.getElementById('dr-cleanup-cnt').innerText = cc;
 }}
@@ -7113,20 +7112,7 @@ function editCfItem(id) {{
 }}
 
 
-async function initWebFactory() {{
-    const sel = document.getElementById('wf-client-sel');
-    if (!sel) return;
-    if (!sel.dataset.ready) {{
-        await ensureClientsLoaded();
-        sel.innerHTML = '<option value="">Выберите клиента</option>' + allClients.map(c => `<option value="${{c.client_id}}">${{c.name}} (${{c.client_id}})</option>`).join('');
-        sel.dataset.ready = '1';
-        const savedClient = localStorage.getItem('ontime_selected_client') || currentClientId;
-        if (savedClient) sel.value = savedClient;
-    }}
-    const cid = sel.value;
-    document.getElementById('wf-status').innerText = cid ? `Клиент: ${{cid}}` : 'Клиент не выбран';
-    renderWebFactoryCards(cid);
-}}
+// initWebFactory legacy stub removed — use initWebFactory(div_id) at line 5956
 
 function renderWebFactoryCards(cid) {{
     const cards = document.getElementById('wf-cards');
