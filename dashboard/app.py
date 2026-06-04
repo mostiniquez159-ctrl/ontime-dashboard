@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 # --- Shared Data & Constants ---
 from data import *
+from data import _load_json, _save_json, _client_folder, _get_loyalty_aggregates
 from templates import get_html, get_module_section_html
 
 # --- Configuration ---
@@ -2907,7 +2908,6 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json({"error": "not found"}, 404)
 
-if __name__ == "__main__":
 if __name__ == "__main__":
     print(f"Starting dashboard on port {PORT}")
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
