@@ -3289,7 +3289,7 @@ def get_html(ministers, initial_tab="home"):
         else:
             for t_id, t_name in g_data["items"].items():
                 nav_html += f'<div class="nav-item" data-tab="{t_id}" onclick="showTab(\'{t_id}\')">{t_name}</div>'
-                if t_id != "kb_clients":
+                if t_id not in ("kb_clients", "home"):
                     if t_id == "wf_templates":
                         sections_html += '<div id="wf_templates" class="section"><h2>Шаблоны</h2><div class="card"><table class="premium-table"><thead><tr><th>Шаблон</th><th>Модуль</th><th>Описание</th></tr></thead><tbody id="wf-templates-body"></tbody></table></div></div>'
                     elif t_id == "wf_runs":
@@ -7372,12 +7372,38 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "api/system/bots": self._json(get_bots_inventory())
         elif path == "api/integrations": self._json(get_integrations_payload())
         elif path == "api/satcity/events":
-            mock_events = [
-                {"id": "SAT-VOV-EVT-MSK-001", "title": "Встреча B2B Moscow", "source": "Ручной ввод", "stage": "Паркинг (Parking)", "risk": "Нет", "next": "Одобрить (Review)"},
-                {"id": "SAT-VOV-EVT-MSK-002", "title": "Форум Инноваций", "source": "VK-Парсер", "stage": "Подготовка публикации (Draft)", "risk": "Дубликат", "next": "Слияние (Merge)"},
-                {"id": "SAT-VOV-EVT-MSK-003", "title": "Хакатон ИИ", "source": "Google Form", "stage": "Publication Handoff", "risk": "Нет", "next": "Отчет (Report)"}
-            ]
-            self._json({"status": "ok", "data": mock_events})
+            import sqlite3, json, os
+            db_path = "/mnt/ontime/Проекты-спутники/vovremya-goroda-moskva-b2b/artifacts/satellite_events.sqlite"
+            events = []
+            if os.path.exists(db_path):
+                conn = sqlite3.connect(db_path)
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT e.sat_event_id as id, e.title, s.source_name as source, e.status as stage, 
+                           p.risk_flags_json as risk 
+                    FROM sat_events e 
+                    LEFT JOIN sat_event_sources s ON e.sat_source_id = s.sat_source_id 
+                    LEFT JOIN sat_event_parking p ON e.sat_event_id = p.sat_event_id
+                    ORDER BY e.created_at DESC 
+                    LIMIT 50
+                """)
+                for r in cur.fetchall():
+                    risk_flags = []
+                    if r['risk']:
+                        try: risk_flags = json.loads(r['risk'])
+                        except: pass
+                    risk_str = ", ".join(risk_flags) if risk_flags else "Нет"
+                    events.append({
+                        "id": r['id'],
+                        "title": r['title'],
+                        "source": r['source'] or "Ручной ввод",
+                        "stage": r['stage'],
+                        "risk": risk_str,
+                        "next": "Одобрить (Review)" if r['stage'] == 'parking' else "Опубликовать (Handoff)"
+                    })
+                conn.close()
+            self._json({"status": "ok", "data": events})
         elif path == "api/tech/server": self._json({"status": "ok", "data": {"metrics": get_server_status()}})
         elif path == "api/tech/queues": self._json({"status": "ok", "data": get_tech_queue_stats()})
         elif path == "api/tech/errors": self._json({"status": "ok", "data": get_tech_errors()})
