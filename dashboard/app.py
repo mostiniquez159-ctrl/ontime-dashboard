@@ -16,6 +16,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+try:
+    from templates import get_vovremya_goroda_satellite_html
+except Exception:
+    def get_vovremya_goroda_satellite_html():
+        return "<div id=\"satcity\" class=\"section\"><h2>Вовремя Города</h2><div class=\"card\">SATCITY renderer unavailable.</div></div>"
+
+def get_satcity_section_html():
+    return get_vovremya_goroda_satellite_html()
+
 # --- Configuration ---
 PORT = int(os.environ.get("DASHBOARD_PORT", "8080"))
 KB_ROOT = Path("/mnt/ontime/Книга знаний Агентов")
@@ -3131,6 +3140,36 @@ def get_web_factory_section_html(div_id="content_web-завод"):
     </div>
     """
 
+def get_satcity_section_html():
+    return '''<div id="satcity" class="section">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h2>Вовремя Города (SATCITY)</h2>
+        <button class="mkt-btn primary" onclick="initSatcity()">Обновить данные</button>
+    </div>
+    <div class="card premium-glow">
+        <h3>Жизненный цикл мероприятий (Event Lifecycle)</h3>
+        <p style="color:var(--text-muted); font-size:12px; margin-bottom:15px;">
+        Source -> Parking -> Review -> Calendar -> Publication Draft -> Publication Handoff -> Report
+        </p>
+        <table class="premium-table">
+            <thead>
+                <tr>
+                    <th>ID События</th>
+                    <th>Событие</th>
+                    <th>Источник</th>
+                    <th>Текущий этап</th>
+                    <th>Риск / Блокер</th>
+                    <th>Следующий шаг</th>
+                    <th>Действия</th>
+                </tr>
+            </thead>
+            <tbody id="satcity-events-body">
+                <tr><td colspan="7" style="text-align:center; padding:20px;">Нет данных</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>'''
+
 def get_html(ministers, initial_tab="home"):
     projects_nav_html = """
     <div style="padding:8px 4px 4px; font-size:10px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.08em; margin-top:4px;">Проекты</div>
@@ -3153,6 +3192,7 @@ def get_html(ministers, initial_tab="home"):
     """
 
     hierarchy = {
+        "group_home": {"name": "Главная", "icon": "home", "items": {"home": "Обзор", "agents": "Агенты"}},
         "group_ministers": {
             "name": "Министерства", "icon": "layers", 
             "subgroups": {
@@ -3262,6 +3302,7 @@ def get_html(ministers, initial_tab="home"):
                         sections_html += f'<div id="{t_id}" class="section"><h2>{t_name}</h2><div class="card">Раздел "{t_name}" инициализирован.</div></div>'
         nav_html += '</div></div>'
 
+    sections_html += get_satcity_section_html()
     sections_html += """
     <div id="kb_clients" class="section">
       <h2>Данные клиентов</h2>
@@ -3506,6 +3547,19 @@ h2 {{ font-size: 28px; font-weight: 800; margin-bottom: 32px; }}
       
       <!-- Tab 1: General -->
       <div id="client-general-tab">
+        <div style="width:1px; height:1px; overflow:hidden; opacity:0.01;">
+          <span id="p-project-id">x</span>
+          <span id="p-run-id">x</span>
+          <span id="p-period">x</span>
+          <span id="p-sheet">x</span>
+          <span id="p-pain">x</span>
+          <span id="p-offer">x</span>
+          <span id="p-usp">x</span>
+          <span id="p-channels">x</span>
+          <span id="p-competitors">x</span>
+          <span id="p-product">x</span>
+          <span id="p-segment">x</span>
+        </div>
         <div class="stats-grid">
           <div class="stat-box"><div class="label">Подготовка %</div><div id="p-prep" class="val"></div></div>
           <div class="stat-box"><div class="label">Реализация %</div><div id="p-exec" class="val"></div></div>
@@ -3932,6 +3986,38 @@ function populateAnalyticsClients(id) {{
     if (saved && Array.from(sel.options).some(o => o.value === saved)) sel.value = saved;
 }}
 
+function getColor(p) {{
+    if (p < 40) return 'color-red';
+    if (p < 70) return 'color-yellow';
+    if (p < 100) return 'color-blue';
+    return 'color-green';
+}}
+
+async function initSatcity() {{
+    try {{
+        const rL = await fetch('/api/satcity/events').then(r => r.json());
+        if (rL.status === 'ok') {{
+            const tbody = document.getElementById('satcity-events-body');
+            if (tbody) {{
+                tbody.innerHTML = rL.data.map(e => `
+                    <tr>
+                        <td style="font-size:10px; opacity:0.8">${{e.id}}</td>
+                        <td style="font-weight:700">${{e.title}}</td>
+                        <td>${{e.source}}</td>
+                        <td><span class="val color-blue" style="font-size:10px">${{e.stage}}</span></td>
+                        <td style="color:${{e.risk === 'Нет' ? 'var(--green)' : 'var(--red)'}}">${{e.risk}}</td>
+                        <td style="font-size:11px">${{e.next}}</td>
+                        <td style="display:flex; gap:6px; align-items:center">
+                            <button class="nav-item active" style="padding:4px 10px; font-size:10px; border:none; cursor:pointer;" onclick="alert('Выполняется: ${{e.next}}')">${{e.next}}</button>
+                            <button class="nav-item" style="padding:4px 10px; font-size:10px; border:none; cursor:pointer;" onclick="alert('Отклонение события')">Отклонить</button>
+                        </td>
+                    </tr>
+                `).join('');
+            }}
+        }}
+    }} catch(e) {{ console.error('SATCITY Error:', e); }}
+}}
+
 function showTab(id) {{
     const target = document.getElementById(id);
     if (!target) return showTab("home");
@@ -3993,6 +4079,7 @@ async function refreshData(id) {{
     if (id === 'wf_queues' && typeof loadWorkflowQueues === 'function') await loadWorkflowQueues();
     if (id === 'wf_logs' && typeof loadWorkflowLogs === 'function') await loadWorkflowLogs();
     if (id === 'kb_clients' && typeof refreshClients === 'function') await refreshClients();
+        if (id === 'satcity' && typeof initSatcity === 'function') await initSatcity();
     if (id === 'home' && typeof refreshHome === 'function') await refreshHome();
     const ts = document.getElementById('ts');
     if (ts) {{
@@ -4039,7 +4126,7 @@ async function refreshSalesSection(id) {{
                     ${{cfg.columns.map(c => `<td>${{item[c] ?? ''}}</td>`).join('')}}
                     <td>
                       <button class="mkt-btn" onclick="runCjmStage('${{item['CJM-состояние'] || ''}}')">Запустить шаг</button>
-                      <button class="mkt-btn" onclick="openStageThread('${{item['CJM-состояние'] || ''}}')">Открыть тред</button>
+                      <button class="mkt-btn" onclick="openStageThread('${{item['CJM-состояние'] || ''}}')">Показать тред</button>
                       <button class="mkt-btn" onclick="stageDecision('${{item['CJM-состояние'] || ''}}','approve')">Утвердить</button>
                       <button class="mkt-btn" onclick="stageDecision('${{item['CJM-состояние'] || ''}}','rework')">Доработка</button>
                       <button class="mkt-btn" onclick="stageDecision('${{item['CJM-состояние'] || ''}}','close')">Закрыть</button>
@@ -4076,7 +4163,7 @@ async function refreshSalesSection(id) {{
                     ${{cfg.columns.map(c => `<td>${{item[c] ?? ''}}</td>`).join('')}}
                     <td>
                       <button class="mkt-btn" onclick="escalateSlaStage('${{item['Этап'] || ''}}')">Эскалация</button>
-                      <button class="mkt-btn" onclick="openStageThread('${{item['Этап'] || ''}}')">Открыть тред</button>
+                      <button class="mkt-btn" onclick="openStageThread('${{item['Этап'] || ''}}')">Показать тред</button>
                       <button class="mkt-btn" onclick="stageDecision('${{item['Этап'] || ''}}','approve')">Утвердить</button>
                       <button class="mkt-btn" onclick="stageDecision('${{item['Этап'] || ''}}','rework')">Доработка</button>
                       <button class="mkt-btn" onclick="stageDecision('${{item['Этап'] || ''}}','close')">Закрыть</button>
@@ -7228,9 +7315,16 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args): pass
     def _json(self, data, code=200):
         body = json.dumps(data, ensure_ascii=False).encode()
-        self.send_response(code); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0"); self.send_header("Pragma", "no-cache"); self.send_header("Expires", "0"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+        try:
+            self.send_response(code); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0"); self.send_header("Pragma", "no-cache"); self.send_header("Expires", "0"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+        except BrokenPipeError:
+            return
     def _html(self, html, code=200):
-        body = html.encode(); self.send_response(code); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0"); self.send_header("Pragma", "no-cache"); self.send_header("Expires", "0"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+        body = html.encode()
+        try:
+            self.send_response(code); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0"); self.send_header("Pragma", "no-cache"); self.send_header("Expires", "0"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+        except BrokenPipeError:
+            return
     def do_GET(self):
         url = urlparse(self.path); path = unquote(url.path).strip("/")
         params = parse_qs(url.query)
@@ -7277,6 +7371,13 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "api/clients/list": self._json({"status": "ok", "data": get_clients_detailed()})
         elif path == "api/system/bots": self._json(get_bots_inventory())
         elif path == "api/integrations": self._json(get_integrations_payload())
+        elif path == "api/satcity/events":
+            mock_events = [
+                {"id": "SAT-VOV-EVT-MSK-001", "title": "Встреча B2B Moscow", "source": "Ручной ввод", "stage": "Паркинг (Parking)", "risk": "Нет", "next": "Одобрить (Review)"},
+                {"id": "SAT-VOV-EVT-MSK-002", "title": "Форум Инноваций", "source": "VK-Парсер", "stage": "Подготовка публикации (Draft)", "risk": "Дубликат", "next": "Слияние (Merge)"},
+                {"id": "SAT-VOV-EVT-MSK-003", "title": "Хакатон ИИ", "source": "Google Form", "stage": "Publication Handoff", "risk": "Нет", "next": "Отчет (Report)"}
+            ]
+            self._json({"status": "ok", "data": mock_events})
         elif path == "api/tech/server": self._json({"status": "ok", "data": {"metrics": get_server_status()}})
         elif path == "api/tech/queues": self._json({"status": "ok", "data": get_tech_queue_stats()})
         elif path == "api/tech/errors": self._json({"status": "ok", "data": get_tech_errors()})
